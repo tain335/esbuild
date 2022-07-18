@@ -2265,7 +2265,6 @@ func (b *Bundle) Compile(log logger.Log, options config.Options, timer *helpers.
 		}
 		outputFiles = outputFiles[:end]
 	}
-
 	return outputFiles, metafileJSON
 }
 
@@ -2489,7 +2488,7 @@ func (cache *runtimeCache) parseRuntime(options *config.Options) (source logger.
 
 		// Always do tree shaking for the runtime because we never want to
 		// include unnecessary runtime code
-		TreeShaking: true,
+		TreeShaking: options.TreeShaking,
 	}))
 	if log.HasErrors() {
 		msgs := "Internal error: failed to parse runtime:\n"

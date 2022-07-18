@@ -1,0 +1,17 @@
+diff a/internal/js_parser/js_parser.go b/internal/js_parser/js_parser.go	(rejected hunks)
+@@ -351,6 +351,7 @@ type thenCatchChain struct {
+ // "package.json" or "tsconfig.json" files that were changed since the last
+ // build.
+ type Options struct {
++	Symbols       []js_ast.Symbol
+ 	injectedFiles []config.InjectedFile
+ 	jsx           config.JSXOptions
+ 	tsTarget      *config.TSTarget
+@@ -14505,6 +14506,7 @@ func newParser(log logger.Log, source logger.Source, lexer js_lexer.Lexer, optio
+ 		allowIn:                  true,
+ 		options:                  *options,
+ 		runtimeImports:           make(map[string]js_ast.Ref),
++		symbols:                  options.Symbols,
+ 		promiseRef:               js_ast.InvalidRef,
+ 		afterArrowBodyLoc:        logger.Loc{Start: -1},
+ 		importMetaRef:            js_ast.InvalidRef,

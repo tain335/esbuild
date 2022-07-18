@@ -321,6 +321,8 @@ type BuildOptions struct {
 	Plugins        []Plugin      // Documentation: https://esbuild.github.io/plugins/
 
 	Watch *WatchMode // Documentation: https://esbuild.github.io/api/#watch
+
+	Dev bool
 }
 
 type EntryPoint struct {
@@ -428,6 +430,12 @@ func Transform(input string, options TransformOptions) TransformResult {
 ////////////////////////////////////////////////////////////////////////////////
 // Serve API
 
+type DevServeOptions struct {
+	Port       uint32
+	Host       string
+	PublicPath string
+}
+
 // Documentation: https://esbuild.github.io/api/#serve-arguments
 type ServeOptions struct {
 	Port      uint16
@@ -454,7 +462,11 @@ type ServeResult struct {
 
 // Documentation: https://esbuild.github.io/api/#serve
 func Serve(serveOptions ServeOptions, buildOptions BuildOptions) (ServeResult, error) {
-	return serveImpl(serveOptions, buildOptions)
+	if buildOptions.Dev {
+		return devServeImpl(serveOptions, buildOptions)
+	} else {
+		return serveImpl(serveOptions, buildOptions)
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////

@@ -1,0 +1,9 @@
+diff a/internal/js_printer/js_printer.go b/internal/js_printer/js_printer.go	(rejected hunks)
+@@ -1421,7 +1430,6 @@ const (
+ 
+ func (p *printer) printExpr(expr js_ast.Expr, level js_ast.L, flags printExprFlags) {
+ 	p.addSourceMapping(expr.Loc)
+-
+ 	switch e := expr.Data.(type) {
+ 	case *js_ast.EMissing:
+ 

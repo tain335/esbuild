@@ -3,6 +3,7 @@ package js_ast
 import (
 	"sort"
 	"strconv"
+	"sync"
 
 	"github.com/evanw/esbuild/internal/ast"
 	"github.com/evanw/esbuild/internal/compat"
@@ -1677,12 +1678,22 @@ type SymbolMap struct {
 	// single inner array, so you can join the maps together by just make a
 	// single outer array containing all of the inner arrays. See the comment on
 	// "Ref" for more detail.
-	SymbolsForSource [][]Symbol
+	// SymbolsForSource [][]Symbol
+	AccessLock       sync.Mutex
+	SymbolsForSource map[uint32][]Symbol
+	// SymbolsForSource [][]Symbol
 }
 
-func NewSymbolMap(sourceCount int) SymbolMap {
-	return SymbolMap{make([][]Symbol, sourceCount)}
+func NewSymbolMap() SymbolMap {
+	return SymbolMap{
+		AccessLock:       sync.Mutex{},
+		SymbolsForSource: make(map[uint32][]Symbol),
+	}
 }
+
+// func NewSymbolMap(sourceCount int) SymbolMap {
+// 	return SymbolMap{make([][]Symbol, sourceCount)}
+// }
 
 func (sm SymbolMap) Get(ref Ref) *Symbol {
 	return &sm.SymbolsForSource[ref.SourceIndex][ref.InnerIndex]

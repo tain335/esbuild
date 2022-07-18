@@ -130,7 +130,8 @@ func CloneLinkerGraph(
 	codeSplitting bool,
 ) LinkerGraph {
 	entryPoints := append([]EntryPoint{}, originalEntryPoints...)
-	symbols := js_ast.NewSymbolMap(len(inputFiles))
+	symbols := js_ast.NewSymbolMap()
+	// symbols := js_ast.NewSymbolMap(len(inputFiles))
 	files := make([]LinkerFile, len(inputFiles))
 
 	// Mark all entry points so we don't add them again for import() expressions
@@ -165,7 +166,9 @@ func CloneLinkerGraph(
 
 				// Clone the symbol map
 				fileSymbols := append([]js_ast.Symbol{}, repr.AST.Symbols...)
+				symbols.AccessLock.Lock()
 				symbols.SymbolsForSource[sourceIndex] = fileSymbols
+				symbols.AccessLock.Unlock()
 				repr.AST.Symbols = nil
 
 				// Clone the parts
@@ -340,14 +343,17 @@ func (g *LinkerGraph) AddPartToFile(sourceIndex uint32, part js_ast.Part) uint32
 }
 
 func (g *LinkerGraph) GenerateNewSymbol(sourceIndex uint32, kind js_ast.SymbolKind, originalName string) js_ast.Ref {
-	sourceSymbols := &g.Symbols.SymbolsForSource[sourceIndex]
-
+	var sourceSymbols *[]js_ast.Symbol
+	if symbols, ok := g.Symbols.SymbolsForSource[sourceIndex]; ok {
+		sourceSymbols = &symbols
+	}
+	// sourceSymbols := &g.Symbols.SymbolsForSource[sourceIndex]
 	ref := js_ast.Ref{
 		SourceIndex: sourceIndex,
 		InnerIndex:  uint32(len(*sourceSymbols)),
 	}
 
-	*sourceSymbols = append(*sourceSymbols, js_ast.Symbol{
+	g.Symbols.SymbolsForSource[sourceIndex] = append(*sourceSymbols, js_ast.Symbol{
 		Kind:         kind,
 		OriginalName: originalName,
 		Link:         js_ast.InvalidRef,

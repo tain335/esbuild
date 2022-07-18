@@ -1,0 +1,9 @@
+diff a/internal/js_ast/js_ast.go b/internal/js_ast/js_ast.go	(rejected hunks)
+@@ -3,6 +3,7 @@ package js_ast
+ import (
+ 	"math"
+ 	"sort"
++	"sync"
+ 
+ 	"github.com/evanw/esbuild/internal/ast"
+ 	"github.com/evanw/esbuild/internal/compat"

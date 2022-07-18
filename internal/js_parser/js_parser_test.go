@@ -62,7 +62,7 @@ func expectPrintedCommon(t *testing.T, contents string, expected string, options
 		if !ok {
 			t.Fatal("Parse error")
 		}
-		symbols := js_ast.NewSymbolMap(1)
+		symbols := js_ast.NewSymbolMap()
 		symbols.SymbolsForSource[0] = tree.Symbols
 		r := renamer.NewNoOpRenamer(symbols)
 		js := js_printer.Print(tree, symbols, r, js_printer.Options{

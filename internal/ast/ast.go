@@ -32,6 +32,9 @@ const (
 
 	// A CSS "url(...)" token
 	ImportURL
+
+	// Pack Require
+	PackRequire
 )
 
 func (kind ImportKind) StringForMetafile() string {

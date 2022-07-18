@@ -1,0 +1,14 @@
+diff a/internal/bundler/bundler.go b/internal/bundler/bundler.go	(rejected hunks)
+@@ -2061,9 +2061,10 @@ func (b *Bundle) Compile(log logger.Log, options config.Options, timer *helpers.
+ 
+ 	var resultGroups [][]graph.OutputFile
+ 	if options.CodeSplitting || len(b.entryPoints) == 1 {
++		resultGroups = [][]graph.OutputFile{packLink(&options, timer, log, b.fs, b.res, files, b.entryPoints, b.uniqueKeyPrefix, allReachableFiles, dataForSourceMaps)}
+ 		// If code splitting is enabled or if there's only one entry point, link all entry points together
+-		resultGroups = [][]graph.OutputFile{link(
+-			&options, timer, log, b.fs, b.res, files, b.entryPoints, b.uniqueKeyPrefix, allReachableFiles, dataForSourceMaps)}
++		// resultGroups = [][]graph.OutputFile{link(
++		// 	&options, timer, log, b.fs, b.res, files, b.entryPoints, b.uniqueKeyPrefix, allReachableFiles, dataForSourceMaps)}
+ 	} else {
+ 		// Otherwise, link each entry point with the runtime file separately
+ 		waitGroup := sync.WaitGroup{}

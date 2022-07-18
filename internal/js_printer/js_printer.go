@@ -1154,11 +1154,20 @@ func (p *printer) printRequireOrImportExpr(
 	flags printExprFlags,
 ) {
 	record := &p.importRecords[importRecordIndex]
-
 	if level >= js_ast.LNew || (flags&forbidCall) != 0 {
 		p.print("(")
 		defer p.print(")")
 		level = js_ast.LLowest
+	}
+
+	if record.Kind == ast.PackRequire {
+		p.printSpaceBeforeIdentifier()
+		p.print("require")
+		p.print("(")
+		p.addSourceMapping(record.Range.Loc)
+		p.printQuotedUTF8(record.Path.Text, true /* allowBacktick */)
+		p.print(")")
+		return
 	}
 
 	if !record.SourceIndex.IsValid() {
@@ -3717,7 +3726,6 @@ func Print(tree js_ast.AST, symbols js_ast.SymbolMap, r renamer.Renamer, options
 		prevRegExpEnd:      -1,
 		builder:            sourcemap.MakeChunkBuilder(options.InputSourceMap, options.LineOffsetTables),
 	}
-
 	p.isUnbound = func(ref js_ast.Ref) bool {
 		ref = js_ast.FollowSymbols(symbols, ref)
 		return symbols.Get(ref).Kind == js_ast.SymbolUnbound

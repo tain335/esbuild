@@ -360,6 +360,7 @@ type thenCatchChain struct {
 // "package.json" or "tsconfig.json" files that were changed since the last
 // build.
 type Options struct {
+	Symbols        []js_ast.Symbol
 	injectedFiles  []config.InjectedFile
 	jsx            config.JSXOptions
 	tsTarget       *config.TSTarget
@@ -15286,6 +15287,7 @@ func newParser(log logger.Log, source logger.Source, lexer js_lexer.Lexer, optio
 		lexer:                    lexer,
 		allowIn:                  true,
 		options:                  *options,
+		symbols:                  options.Symbols,
 		runtimeImports:           make(map[string]js_ast.Ref),
 		promiseRef:               js_ast.InvalidRef,
 		regExpRef:                js_ast.InvalidRef,
