@@ -3,18 +3,29 @@ name: End-to-end install tests
 on:
   schedule:
     - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read  #  to fetch code (actions/checkout)
 
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
 
       - name: Setup Node.js environment
-        uses: actions/setup-node@v1.4.4
+        uses: actions/setup-node@v3
         with:
           node-version: 16
+
+      # The version of Deno is pinned because version 1.25.1 was causing test
+      # flakes due to random segfaults.
+      - name: Setup Deno 1.24.0
+        uses: denoland/setup-deno@main
+        with:
+          deno-version: v1.24.0
 
       - name: Test npm
         run: |
@@ -30,3 +41,7 @@ jobs:
         run: |
           npm i -g yarn@latest
           time make test-e2e-yarn-berry
+
+      - name: Test deno
+        run: |
+          time make test-e2e-deno

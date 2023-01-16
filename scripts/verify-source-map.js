@@ -320,6 +320,88 @@ const testCaseBundleCSS = {
   `,
 }
 
+const testCaseJSXRuntime = {
+  'entry.jsx': `
+    import { A0, A1, A2 } from './a.jsx';
+    console.log(<A0><A1/><A2/></A0>)
+  `,
+  'a.jsx': `
+    import {jsx} from './b-dir/b'
+    import {Fragment} from './b-dir/c-dir/c'
+    export function A0() { return <Fragment id="A0"><>a0</></Fragment> }
+    export function A1() { return <div {...jsx} data-testid="A1">a1</div> }
+    export function A2() { return <A1 id="A2"><a/><b/></A1> }
+  `,
+  'b-dir/b.js': `
+    export const jsx = {id: 'jsx'}
+  `,
+  'b-dir/c-dir/c.jsx': `
+    exports.Fragment = function() { return <></> }
+  `,
+}
+
+const toSearchJSXRuntime = {
+  A0: 'a.jsx',
+  A1: 'a.jsx',
+  A2: 'a.jsx',
+  jsx: 'b-dir/b.js',
+}
+
+const testCaseNames = {
+  'entry.js': `
+    import "./nested1"
+
+    // Test regular name positions
+    var /**/foo = /**/foo || 0
+    function /**/fn(/**/bar) {}
+    class /**/cls {}
+    keep(fn, cls) // Make sure these aren't removed
+
+    // Test property mangling name positions
+    var { /**/mangle_: bar } = foo
+    var { /**/'mangle_': bar } = foo
+    foo./**/mangle_ = 1
+    foo[/**/'mangle_']
+    foo = { /**/mangle_: 0 }
+    foo = { /**/'mangle_': 0 }
+    foo = class { /**/mangle_ = 0 }
+    foo = class { /**/'mangle_' = 0 }
+    foo = /**/'mangle_' in bar
+  `,
+  'nested1.js': `
+    import { foo } from './nested2'
+    foo(bar)
+  `,
+  'nested2.jsx': `
+    export let /**/foo = /**/bar => /**/bar()
+  `
+}
+
+const testCaseMissingSourcesContent = {
+  'foo.js': `// foo.ts
+var foo = { bar: "bar" };
+console.log({ foo });
+//# sourceMappingURL=maps/foo.js.map
+`,
+  'maps/foo.js.map': `{
+  "version": 3,
+  "sources": ["src/foo.ts"],
+  "mappings": ";AAGA,IAAM,MAAW,EAAE,KAAK,MAAM;AAC9B,QAAQ,IAAI,EAAE,IAAI,CAAC;",
+  "names": []
+}
+`,
+  'maps/src/foo.ts': `interface Foo {
+  bar: string
+}
+const foo: Foo = { bar: 'bar' }
+console.log({ foo })
+`,
+}
+
+const toSearchMissingSourcesContent = {
+  bar: 'src/foo.ts',
+}
+
 async function check(kind, testCase, toSearch, { ext, flags, entryPoints, crlf, followUpFlags = [] }) {
   let failed = 0
 
@@ -388,6 +470,7 @@ async function check(kind, testCase, toSearch, { ext, flags, entryPoints, crlf, 
         recordCheck(source === inSource, `expected source: ${inSource}, observed source: ${source}`)
 
         const inCode = map.sourceContentFor(source)
+        if (inCode === null) throw new Error(`Got null for source content for "${source}"`)
         let inIndex = inCode.indexOf(`"${id}"`)
         if (inIndex < 0) inIndex = inCode.indexOf(`'${id}'`)
         if (inIndex < 0) throw new Error(`Failed to find "${id}" in input`)
@@ -469,6 +552,146 @@ async function check(kind, testCase, toSearch, { ext, flags, entryPoints, crlf, 
         '--outfile=' + path.join(tempDir, `out2.${ext}`),
         '--sourcemap',
       ].concat(followUpFlags), { cwd: testDir })
+
+      const out2Code = await fs.readFile(path.join(tempDir, `out2.${ext}`), 'utf8')
+      recordCheck(out2Code.includes(`# sourceMappingURL=out2.${ext}.map`), `.${ext} file must link to .${ext}.map`)
+      const out2CodeMap = await fs.readFile(path.join(tempDir, `out2.${ext}.map`), 'utf8')
+
+      const out2Map = await new SourceMapConsumer(out2CodeMap)
+      checkMap(out2Code, out2Map)
+    }
+
+    if (!failed) removeRecursiveSync(tempDir)
+  }
+
+  catch (e) {
+    console.error(`❌ [${kind}] ${e && e.message || e}`)
+    failed++
+  }
+
+  return failed
+}
+
+async function checkNames(kind, testCase, { ext, flags, entryPoints, crlf }) {
+  let failed = 0
+
+  try {
+    const recordCheck = (success, message) => {
+      if (!success) {
+        failed++
+        console.error(`❌ [${kind}] ${message}`)
+      }
+    }
+
+    const tempDir = path.join(testDir, `${kind}-${tempDirCount++}`)
+    await fs.mkdir(tempDir, { recursive: true })
+
+    for (const name in testCase) {
+      const tempPath = path.join(tempDir, name)
+      let code = testCase[name]
+      await fs.mkdir(path.dirname(tempPath), { recursive: true })
+      if (crlf) code = code.replace(/\n/g, '\r\n')
+      await fs.writeFile(tempPath, code)
+    }
+
+    const args = ['--sourcemap', '--log-level=warning'].concat(flags)
+    let stdout = ''
+
+    await new Promise((resolve, reject) => {
+      args.unshift(...entryPoints)
+      const child = childProcess.spawn(esbuildPath, args, { cwd: tempDir, stdio: ['pipe', 'pipe', 'inherit'] })
+      child.stdin.end()
+      child.stdout.on('data', chunk => stdout += chunk.toString())
+      child.stdout.on('end', resolve)
+      child.on('error', reject)
+    })
+
+    const outCode = await fs.readFile(path.join(tempDir, `out.${ext}`), 'utf8')
+    recordCheck(outCode.includes(`# sourceMappingURL=out.${ext}.map`), `.${ext} file must link to .${ext}.map`)
+    const outCodeMap = await fs.readFile(path.join(tempDir, `out.${ext}.map`), 'utf8')
+
+    // Check the mapping of various key locations back to the original source
+    const checkMap = (out, map) => {
+      const undoQuotes = x => `'"`.includes(x[0]) ? (0, eval)(x) : x.startsWith('(') ? x.slice(1, -1) : x
+      const generatedLines = out.split(/\r\n|\r|\n/g)
+
+      for (let i = 0; i < map.sources.length; i++) {
+        const source = map.sources[i]
+        const content = map.sourcesContent[i];
+        let index = 0
+
+        // The names for us to check are prefixed by "/**/" right before to mark them
+        const parts = content.split(/(\/\*\*\/(?:\w+|'\w+'|"\w+"))/g)
+
+        for (let j = 1; j < parts.length; j += 2) {
+          const expectedName = undoQuotes(parts[j].slice(4))
+          index += parts[j - 1].length
+
+          const prefixLines = content.slice(0, index + 4).split(/\r\n|\r|\n/g)
+          const line = prefixLines.length
+          const column = prefixLines[prefixLines.length - 1].length
+          index += parts[j].length
+
+          // There may be multiple mappings if the expression is spread across
+          // multiple lines. Check each one to see if any pass the checks.
+          const allGenerated = map.allGeneratedPositionsFor({ source, line, column })
+          for (let i = 0; i < allGenerated.length; i++) {
+            const canSkip = i + 1 < allGenerated.length // Don't skip the last one
+            const generated = allGenerated[i]
+            const original = map.originalPositionFor(generated)
+            if (canSkip && (original.source !== source || original.line !== line || original.column !== column)) continue
+            recordCheck(original.source === source && original.line === line && original.column === column,
+              `\n` +
+              `\n  original position:               ${JSON.stringify({ source, line, column })}` +
+              `\n  maps to generated position:      ${JSON.stringify(generated)}` +
+              `\n  which maps to original position: ${JSON.stringify(original)}` +
+              `\n`)
+
+            if (original.source === source && original.line === line && original.column === column) {
+              const generatedContentAfter = generatedLines[generated.line - 1].slice(generated.column)
+              const matchAfter = /^(?:\w+|'\w+'|"\w+"|\(\w+\))/.exec(generatedContentAfter)
+              if (canSkip && matchAfter === null) continue
+              recordCheck(matchAfter !== null, `expected the identifier ${JSON.stringify(expectedName)} starting on line ${generated.line} here: ${generatedContentAfter.slice(0, 100)}`)
+
+              if (matchAfter !== null) {
+                const observedName = undoQuotes(matchAfter[0])
+                if (canSkip && expectedName !== (original.name || observedName)) continue
+                recordCheck(expectedName === (original.name || observedName),
+                  `\n` +
+                  `\n  generated position: ${JSON.stringify(generated)}` +
+                  `\n  original position:  ${JSON.stringify(original)}` +
+                  `\n` +
+                  `\n  original name:  ${JSON.stringify(expectedName)}` +
+                  `\n  generated name: ${JSON.stringify(observedName)}` +
+                  `\n  mapping name:   ${JSON.stringify(original.name)}` +
+                  `\n`)
+              }
+            }
+
+            break
+          }
+        }
+      }
+    }
+
+    const outMap = await new SourceMapConsumer(outCodeMap)
+    checkMap(outCode, outMap)
+
+    // Bundle again to test nested source map chaining
+    for (let order of [0, 1, 2]) {
+      const fileToTest = `out.${ext}`
+      const nestedEntry = path.join(tempDir, `nested-entry.${ext}`)
+      await fs.writeFile(path.join(tempDir, `extra.${ext}`), `console.log('extra')`)
+      await fs.writeFile(nestedEntry,
+        order === 1 ? `import './${fileToTest}'; import './extra.${ext}'` :
+          order === 2 ? `import './extra.${ext}'; import './${fileToTest}'` :
+            `import './${fileToTest}'`)
+      await execFileAsync(esbuildPath, [
+        nestedEntry,
+        '--bundle',
+        '--outfile=' + path.join(tempDir, `out2.${ext}`),
+        '--sourcemap',
+      ], { cwd: testDir })
 
       const out2Code = await fs.readFile(path.join(tempDir, `out2.${ext}`), 'utf8')
       recordCheck(out2Code.includes(`# sourceMappingURL=out2.${ext}.map`), `.${ext} file must link to .${ext}.map`)
@@ -598,6 +821,46 @@ async function main() {
           ext: 'css',
           flags: flags.concat('--outfile=out.css', '--bundle'),
           entryPoints: ['entry.css'],
+          crlf,
+        }),
+        check('jsx-runtime' + suffix, testCaseJSXRuntime, toSearchJSXRuntime, {
+          ext: 'js',
+          flags: flags.concat('--outfile=out.js', '--bundle', '--jsx=automatic', '--external:react/jsx-runtime'),
+          entryPoints: ['entry.jsx'],
+          crlf,
+        }),
+        check('jsx-dev-runtime' + suffix, testCaseJSXRuntime, toSearchJSXRuntime, {
+          ext: 'js',
+          flags: flags.concat('--outfile=out.js', '--bundle', '--jsx=automatic', '--jsx-dev', '--external:react/jsx-dev-runtime'),
+          entryPoints: ['entry.jsx'],
+          crlf,
+        }),
+
+        // Checks for the "names" field
+        checkNames('names' + suffix, testCaseNames, {
+          ext: 'js',
+          flags: flags.concat('--outfile=out.js', '--bundle'),
+          entryPoints: ['entry.js'],
+          crlf,
+        }),
+        checkNames('names-mangle' + suffix, testCaseNames, {
+          ext: 'js',
+          flags: flags.concat('--outfile=out.js', '--bundle', '--mangle-props=^mangle_$'),
+          entryPoints: ['entry.js'],
+          crlf,
+        }),
+        checkNames('names-mangle-quoted' + suffix, testCaseNames, {
+          ext: 'js',
+          flags: flags.concat('--outfile=out.js', '--bundle', '--mangle-props=^mangle_$', '--mangle-quoted'),
+          entryPoints: ['entry.js'],
+          crlf,
+        }),
+
+        // Checks for loading missing sources content in nested source maps
+        check('missing-sources-content' + suffix, testCaseMissingSourcesContent, toSearchMissingSourcesContent, {
+          ext: 'js',
+          flags: flags.concat('--outfile=out.js', '--bundle'),
+          entryPoints: ['foo.js'],
           crlf,
         }),
       )

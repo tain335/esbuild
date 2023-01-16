@@ -1,10 +1,13 @@
 package ast
 
-import "github.com/evanw/esbuild/internal/logger"
-
 // This file contains data structures that are used with the AST packages for
 // both JavaScript and CSS. This helps the bundler treat both AST formats in
 // a somewhat format-agnostic manner.
+
+import (
+	"github.com/evanw/esbuild/internal/helpers"
+	"github.com/evanw/esbuild/internal/logger"
+)
 
 type ImportKind uint8
 
@@ -113,6 +116,15 @@ const (
 
 	// If true, this import can be removed if it's unused
 	IsExternalWithoutSideEffects
+
+	// If true, "assert { type: 'json' }" was present
+	AssertTypeJSON
+
+	// If true, do not generate "external": true in the metafile
+	ShouldNotBeExternalInMetafile
+
+	// CSS "@import" of an empty file should be removed
+	WasLoadedWithEmptyLoader
 )
 
 func (flags ImportRecordFlags) Has(flag ImportRecordFlags) bool {
@@ -120,7 +132,7 @@ func (flags ImportRecordFlags) Has(flag ImportRecordFlags) bool {
 }
 
 type ImportRecord struct {
-	Assertions *[]AssertEntry
+	Assertions *ImportAssertions
 	Path       logger.Path
 	Range      logger.Range
 
@@ -140,12 +152,30 @@ type ImportRecord struct {
 	Kind  ImportKind
 }
 
+type ImportAssertions struct {
+	Entries            []AssertEntry
+	AssertLoc          logger.Loc
+	InnerOpenBraceLoc  logger.Loc
+	InnerCloseBraceLoc logger.Loc
+	OuterOpenBraceLoc  logger.Loc
+	OuterCloseBraceLoc logger.Loc
+}
+
 type AssertEntry struct {
 	Key             []uint16 // An identifier or a string
 	Value           []uint16 // Always a string
 	KeyLoc          logger.Loc
 	ValueLoc        logger.Loc
 	PreferQuotedKey bool
+}
+
+func FindAssertion(assertions []AssertEntry, name string) *AssertEntry {
+	for _, assertion := range assertions {
+		if helpers.UTF16EqualsString(assertion.Key, name) {
+			return &assertion
+		}
+	}
+	return nil
 }
 
 // This stores a 32-bit index where the zero value is an invalid index. This is

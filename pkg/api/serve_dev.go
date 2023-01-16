@@ -1,14 +1,25 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"path"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/evanw/esbuild/internal/fs"
 	"github.com/gorilla/websocket"
 )
+
+type PackMessage struct {
+	Type string `json:"type"`
+	Data string `json:"data"`
+}
+
+type devApiHandler struct {
+	stop func()
+}
 
 var upgrader = websocket.Upgrader{}
 var timeout = 30 * time.Second
@@ -16,11 +27,6 @@ var timeout = 30 * time.Second
 var connectionsMutex = sync.Mutex{}
 var connections = make([]*websocket.Conn, 0, 64)
 var fileCache = make(map[string][]byte)
-
-type PackMessage struct {
-	Type string `json:"type"`
-	Data string `json:"data"`
-}
 
 func removeConnFromSet(conn *websocket.Conn) {
 	connectionsMutex.Lock()
@@ -122,35 +128,44 @@ func onBuild(br BuildResult) {
 
 }
 
-func runBuilder(buildOptions BuildOptions) error {
-	go func() {
-		watch := buildOptions.Watch
-		// 必须开启watch mode
-		buildOptions.Watch = &WatchMode{
-			OnRebuild: func(br BuildResult) {
-				if watch != nil && watch.OnRebuild != nil {
-					watch.OnRebuild(br)
-				}
-				onBuild(br)
-			},
-		}
-		buildResult := buildImpl(buildOptions)
-		onBuild(buildResult.result)
-	}()
+func runBuilder(ctx *internalContext) error {
+	ctx.mutex.Lock()
+	ctx.watcher = &watcher{
+		fs: ctx.realFS,
+		rebuild: func() fs.WatchData {
+			state := ctx.rebuild()
+			onBuild(state.result)
+			return state.watchData
+		},
+	}
+	// 必须开启watch mode
+	ctx.args.options.WatchMode = true
+	ctx.mutex.Unlock()
+
+	ctx.watcher.start(ctx.args.logOptions.LogLevel, ctx.args.logOptions.Color)
+	buildResult := ctx.rebuild().result
+	onBuild(buildResult)
+
 	return nil
 }
 
 // 1. 实现内存服务
 // 2. 实现websoket通知
-func devServeImpl(serveOptions ServeOptions, buildOptions BuildOptions) (result ServeResult, err error) {
+func (ctx *internalContext) DevServe(opts DevServeOptions) (ServeResult, error) {
+	ctx.mutex.Lock()
+	defer ctx.mutex.Unlock()
+
+	if ctx.didDispose {
+		return ServeResult{}, errors.New("Cannot run dev serve on a disposed context")
+	}
 
 	var port uint16 = 8081
-	if serveOptions.Port != 0 {
-		port = serveOptions.Port
+	if opts.Port != 0 {
+		port = opts.Port
 	}
 	host := "0.0.0.0"
-	if serveOptions.Host != "" {
-		host = serveOptions.Host
+	if opts.Host != "" {
+		host = opts.Host
 	}
 	server := http.Server{
 		Addr: host + ":" + strconv.Itoa(int(port)),
@@ -169,7 +184,6 @@ func devServeImpl(serveOptions ServeOptions, buildOptions BuildOptions) (result 
 </html>
 	`
 	fileCache["index.html"] = []byte(html)
-
 	serveWaitGroup := sync.WaitGroup{}
 	serveWaitGroup.Add(1)
 	var serveError error
@@ -179,19 +193,21 @@ func devServeImpl(serveOptions ServeOptions, buildOptions BuildOptions) (result 
 		serveWaitGroup.Done()
 	}()
 
-	result.Wait = func() error {
-		serveWaitGroup.Wait()
-		return serveError
+	handler := &devApiHandler{
+		stop: func() {
+			serveWaitGroup.Wait()
+			server.Close()
+		},
 	}
+
+	ctx.devHandler = handler
+
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		runBuilder(buildOptions)
+		runBuilder(ctx)
 	}()
-	result.Stop = func() {
-		server.Close()
-		serveWaitGroup.Wait()
-	}
+	var result ServeResult
 	result.Port = port
 	result.Host = host
-	return
+	return result, serveError
 }

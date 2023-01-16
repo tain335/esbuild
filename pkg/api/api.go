@@ -3,9 +3,9 @@
 //
 // If you are just trying to run esbuild from Go without the overhead of
 // creating a child process, there is also an API for the command-line
-// interface itself: https://godoc.org/github.com/evanw/esbuild/pkg/cli.
+// interface itself: https://pkg.go.dev/github.com/evanw/esbuild/pkg/cli.
 //
-// Build API
+// # Build API
 //
 // This function runs an end-to-end build operation. It takes an array of file
 // paths as entry points, parses them and all of their dependencies, and
@@ -14,29 +14,29 @@
 //
 // Example usage:
 //
-//     package main
+//	package main
 //
-//     import (
-//         "os"
+//	import (
+//	    "os"
 //
-//         "github.com/evanw/esbuild/pkg/api"
-//     )
+//	    "github.com/evanw/esbuild/pkg/api"
+//	)
 //
-//     func main() {
-//         result := api.Build(api.BuildOptions{
-//             EntryPoints: []string{"input.js"},
-//             Outfile:     "output.js",
-//             Bundle:      true,
-//             Write:       true,
-//             LogLevel:    api.LogLevelInfo,
-//         })
+//	func main() {
+//	    result := api.Build(api.BuildOptions{
+//	        EntryPoints: []string{"input.js"},
+//	        Outfile:     "output.js",
+//	        Bundle:      true,
+//	        Write:       true,
+//	        LogLevel:    api.LogLevelInfo,
+//	    })
 //
-//         if len(result.Errors) > 0 {
-//             os.Exit(1)
-//         }
-//     }
+//	    if len(result.Errors) > 0 {
+//	        os.Exit(1)
+//	    }
+//	}
 //
-// Transform API
+// # Transform API
 //
 // This function transforms a string of source code into JavaScript. It can be
 // used to minify JavaScript, convert TypeScript/JSX to JavaScript, or convert
@@ -45,37 +45,42 @@
 //
 // Example usage:
 //
-//     package main
+//	package main
 //
-//     import (
-//         "fmt"
-//         "os"
+//	import (
+//	    "fmt"
+//	    "os"
 //
-//         "github.com/evanw/esbuild/pkg/api"
-//     )
+//	    "github.com/evanw/esbuild/pkg/api"
+//	)
 //
-//     func main() {
-//         jsx := `
-//             import * as React from 'react'
-//             import * as ReactDOM from 'react-dom'
+//	func main() {
+//	    jsx := `
+//	        import * as React from 'react'
+//	        import * as ReactDOM from 'react-dom'
 //
-//             ReactDOM.render(
-//                 <h1>Hello, world!</h1>,
-//                 document.getElementById('root')
-//             );
-//         `
+//	        ReactDOM.render(
+//	            <h1>Hello, world!</h1>,
+//	            document.getElementById('root')
+//	        );
+//	    `
 //
-//         result := api.Transform(jsx, api.TransformOptions{
-//             Loader: api.LoaderJSX,
-//         })
+//	    result := api.Transform(jsx, api.TransformOptions{
+//	        Loader: api.LoaderJSX,
+//	    })
 //
-//         fmt.Printf("%d errors and %d warnings\n",
-//             len(result.Errors), len(result.Warnings))
+//	    fmt.Printf("%d errors and %d warnings\n",
+//	        len(result.Errors), len(result.Warnings))
 //
-//         os.Stdout.Write(result.Code)
-//     }
-//
+//	    os.Stdout.Write(result.Code)
+//	}
 package api
+
+import (
+	"time"
+
+	"github.com/evanw/esbuild/internal/logger"
+)
 
 type SourceMap uint8
 
@@ -105,11 +110,12 @@ const (
 	LegalCommentsExternal
 )
 
-type JSXMode uint8
+type JSX uint8
 
 const (
-	JSXModeTransform JSXMode = iota
-	JSXModePreserve
+	JSXTransform JSX = iota
+	JSXPreserve
+	JSXAutomatic
 )
 
 type Target uint8
@@ -138,6 +144,7 @@ const (
 	LoaderCSS
 	LoaderDataURL
 	LoaderDefault
+	LoaderEmpty
 	LoaderFile
 	LoaderJS
 	LoaderJSON
@@ -150,7 +157,8 @@ const (
 type Platform uint8
 
 const (
-	PlatformBrowser Platform = iota
+	PlatformDefault Platform = iota
+	PlatformBrowser
 	PlatformNode
 	PlatformNeutral
 )
@@ -162,6 +170,13 @@ const (
 	FormatIIFE
 	FormatCommonJS
 	FormatESModule
+)
+
+type Packages uint8
+
+const (
+	PackagesDefault Packages = iota
+	PackagesExternal
 )
 
 type Engine struct {
@@ -275,9 +290,12 @@ type BuildOptions struct {
 	IgnoreAnnotations bool                   // Documentation: https://esbuild.github.io/api/#ignore-annotations
 	LegalComments     LegalComments          // Documentation: https://esbuild.github.io/api/#legal-comments
 
-	JSXMode     JSXMode // Documentation: https://esbuild.github.io/api/#jsx-mode
-	JSXFactory  string  // Documentation: https://esbuild.github.io/api/#jsx-factory
-	JSXFragment string  // Documentation: https://esbuild.github.io/api/#jsx-fragment
+	JSX             JSX    // Documentation: https://esbuild.github.io/api/#jsx-mode
+	JSXFactory      string // Documentation: https://esbuild.github.io/api/#jsx-factory
+	JSXFragment     string // Documentation: https://esbuild.github.io/api/#jsx-fragment
+	JSXImportSource string // Documentation: https://esbuild.github.io/api/#jsx-import-source
+	JSXDev          bool   // Documentation: https://esbuild.github.io/api/#jsx-dev
+	JSXSideEffects  bool   // Documentation: https://esbuild.github.io/api/#jsx-side-effects
 
 	Define    map[string]string // Documentation: https://esbuild.github.io/api/#define
 	Pure      []string          // Documentation: https://esbuild.github.io/api/#pure
@@ -295,12 +313,14 @@ type BuildOptions struct {
 	Platform          Platform          // Documentation: https://esbuild.github.io/api/#platform
 	Format            Format            // Documentation: https://esbuild.github.io/api/#format
 	External          []string          // Documentation: https://esbuild.github.io/api/#external
+	Packages          Packages          // Documentation: https://esbuild.github.io/api/#packages
+	Alias             map[string]string // Documentation: https://esbuild.github.io/api/#alias
 	MainFields        []string          // Documentation: https://esbuild.github.io/api/#main-fields
 	Conditions        []string          // Documentation: https://esbuild.github.io/api/#conditions
 	Loader            map[string]Loader // Documentation: https://esbuild.github.io/api/#loader
 	ResolveExtensions []string          // Documentation: https://esbuild.github.io/api/#resolve-extensions
 	Tsconfig          string            // Documentation: https://esbuild.github.io/api/#tsconfig
-	OutExtensions     map[string]string // Documentation: https://esbuild.github.io/api/#out-extension
+	OutExtension      map[string]string // Documentation: https://esbuild.github.io/api/#out-extension
 	PublicPath        string            // Documentation: https://esbuild.github.io/api/#public-path
 	Inject            []string          // Documentation: https://esbuild.github.io/api/#inject
 	Banner            map[string]string // Documentation: https://esbuild.github.io/api/#banner
@@ -317,21 +337,13 @@ type BuildOptions struct {
 	Stdin          *StdinOptions // Documentation: https://esbuild.github.io/api/#stdin
 	Write          bool          // Documentation: https://esbuild.github.io/api/#write
 	AllowOverwrite bool          // Documentation: https://esbuild.github.io/api/#allow-overwrite
-	Incremental    bool          // Documentation: https://esbuild.github.io/api/#incremental
 	Plugins        []Plugin      // Documentation: https://esbuild.github.io/plugins/
-
-	Watch *WatchMode // Documentation: https://esbuild.github.io/api/#watch
-
-	Dev bool
+	Dev            bool
 }
 
 type EntryPoint struct {
 	InputPath  string
 	OutputPath string
-}
-
-type WatchMode struct {
-	OnRebuild func(BuildResult)
 }
 
 type StdinOptions struct {
@@ -348,9 +360,6 @@ type BuildResult struct {
 	OutputFiles []OutputFile
 	Metafile    string
 	MangleCache map[string]interface{}
-
-	Rebuild func() BuildResult // Only when "Incremental: true"
-	Stop    func()             // Only when "Watch: true"
 }
 
 type OutputFile struct {
@@ -360,7 +369,23 @@ type OutputFile struct {
 
 // Documentation: https://esbuild.github.io/api/#build-api
 func Build(options BuildOptions) BuildResult {
-	return buildImpl(options).result
+	start := time.Now()
+
+	ctx, errors := contextImpl(options)
+	if ctx == nil {
+		return BuildResult{Errors: errors}
+	}
+
+	result := ctx.Rebuild()
+
+	// Print a summary of the generated files to stderr. Except don't do
+	// this if the terminal is already being used for something else.
+	if ctx.args.logOptions.LogLevel <= logger.LevelInfo && !ctx.args.options.WriteToStdout {
+		printSummary(ctx.args.logOptions.Color, result.OutputFiles, start)
+	}
+
+	ctx.Dispose()
+	return result
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -380,8 +405,9 @@ type TransformOptions struct {
 	Engines   []Engine        // Documentation: https://esbuild.github.io/api/#target
 	Supported map[string]bool // Documentation: https://esbuild.github.io/api/#supported
 
-	Format     Format // Documentation: https://esbuild.github.io/api/#format
-	GlobalName string // Documentation: https://esbuild.github.io/api/#global-name
+	Platform   Platform // Documentation: https://esbuild.github.io/api/#platform
+	Format     Format   // Documentation: https://esbuild.github.io/api/#format
+	GlobalName string   // Documentation: https://esbuild.github.io/api/#global-name
 
 	MangleProps       string                 // Documentation: https://esbuild.github.io/api/#mangle-props
 	ReserveProps      string                 // Documentation: https://esbuild.github.io/api/#mangle-props
@@ -396,9 +422,12 @@ type TransformOptions struct {
 	IgnoreAnnotations bool                   // Documentation: https://esbuild.github.io/api/#ignore-annotations
 	LegalComments     LegalComments          // Documentation: https://esbuild.github.io/api/#legal-comments
 
-	JSXMode     JSXMode // Documentation: https://esbuild.github.io/api/#jsx
-	JSXFactory  string  // Documentation: https://esbuild.github.io/api/#jsx-factory
-	JSXFragment string  // Documentation: https://esbuild.github.io/api/#jsx-fragment
+	JSX             JSX    // Documentation: https://esbuild.github.io/api/#jsx
+	JSXFactory      string // Documentation: https://esbuild.github.io/api/#jsx-factory
+	JSXFragment     string // Documentation: https://esbuild.github.io/api/#jsx-fragment
+	JSXImportSource string // Documentation: https://esbuild.github.io/api/#jsx-import-source
+	JSXDev          bool   // Documentation: https://esbuild.github.io/api/#jsx-dev
+	JSXSideEffects  bool   // Documentation: https://esbuild.github.io/api/#jsx-side-effects
 
 	TsconfigRaw string // Documentation: https://esbuild.github.io/api/#tsconfig-raw
 	Banner      string // Documentation: https://esbuild.github.io/api/#banner
@@ -416,8 +445,9 @@ type TransformResult struct {
 	Errors   []Message
 	Warnings []Message
 
-	Code []byte
-	Map  []byte
+	Code          []byte
+	Map           []byte
+	LegalComments []byte
 
 	MangleCache map[string]interface{}
 }
@@ -428,20 +458,32 @@ func Transform(input string, options TransformOptions) TransformResult {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Serve API
+// Context API
 
-type DevServeOptions struct {
-	Port       uint32
-	Host       string
-	PublicPath string
-}
+// type DevServeOptions struct {
+// 	Port       uint32
+// 	Host       string
+// 	PublicPath string
+// }
 
 // Documentation: https://esbuild.github.io/api/#serve-arguments
 type ServeOptions struct {
 	Port      uint16
 	Host      string
 	Servedir  string
+	Keyfile   string
+	Certfile  string
 	OnRequest func(ServeOnRequestArgs)
+}
+
+type DevServeOptions struct {
+	WatchOptions
+	Port       uint16
+	Host       string
+	PublicPath string
+	// Keyfile    string
+	// Certfile   string
+	// OnRequest  func(ServeOnRequestArgs)
 }
 
 type ServeOnRequestArgs struct {
@@ -456,17 +498,47 @@ type ServeOnRequestArgs struct {
 type ServeResult struct {
 	Port uint16
 	Host string
-	Wait func() error
-	Stop func()
 }
 
-// Documentation: https://esbuild.github.io/api/#serve
-func Serve(serveOptions ServeOptions, buildOptions BuildOptions) (ServeResult, error) {
-	if buildOptions.Dev {
-		return devServeImpl(serveOptions, buildOptions)
-	} else {
-		return serveImpl(serveOptions, buildOptions)
+// // Documentation: https://esbuild.github.io/api/#serve
+// func Serve(serveOptions ServeOptions, buildOptions BuildOptions) (ServeResult, error) {
+// 	if buildOptions.Dev {
+// 		return devServeImpl(serveOptions, buildOptions)
+// 	} else {
+// 		return serveImpl(serveOptions, buildOptions)
+// 	}
+type OnChangeArgs struct {
+}
+
+type WatchOptions struct {
+}
+
+type BuildContext interface {
+	Rebuild() BuildResult
+	Watch(options WatchOptions) error
+	Serve(options ServeOptions) (ServeResult, error)
+	DevServe(options DevServeOptions) (ServeResult, error)
+	Dispose()
+}
+
+type ContextError struct {
+	Errors []Message // Option validation errors are returned here
+}
+
+func (err *ContextError) Error() string {
+	if len(err.Errors) > 0 {
+		return err.Errors[0].Text
 	}
+	return "Context creation failed"
+}
+
+// Documentation: https://esbuild.github.io/api/#context-api
+func Context(buildOptions BuildOptions) (BuildContext, *ContextError) {
+	ctx, errors := contextImpl(buildOptions)
+	if ctx == nil {
+		return nil, &ContextError{Errors: errors}
+	}
+	return ctx, nil
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -488,7 +560,7 @@ type PluginBuild struct {
 	InitialOptions *BuildOptions
 	Resolve        func(path string, options ResolveOptions) ResolveResult
 	OnStart        func(callback func() (OnStartResult, error))
-	OnEnd          func(callback func(result *BuildResult))
+	OnEnd          func(callback func(result *BuildResult) (OnEndResult, error))
 	OnResolve      func(options OnResolveOptions, callback func(OnResolveArgs) (OnResolveResult, error))
 	OnLoad         func(options OnLoadOptions, callback func(OnLoadArgs) (OnLoadResult, error))
 }
@@ -515,6 +587,11 @@ type ResolveResult struct {
 }
 
 type OnStartResult struct {
+	Errors   []Message
+	Warnings []Message
+}
+
+type OnEndResult struct {
 	Errors   []Message
 	Warnings []Message
 }
@@ -580,7 +657,8 @@ type OnLoadResult struct {
 type ResolveKind uint8
 
 const (
-	ResolveEntryPoint ResolveKind = iota
+	ResolveNone ResolveKind = iota
+	ResolveEntryPoint
 	ResolveJSImportStatement
 	ResolveJSRequireCall
 	ResolveJSDynamicImport

@@ -319,6 +319,16 @@ func TestNew(t *testing.T) {
 	expectPrintedMinify(t, "new x().y", "new x().y;")
 	expectPrintedMinify(t, "new x() + y", "new x+y;")
 	expectPrintedMinify(t, "new x() ** 2", "new x**2;")
+
+	// Test preservation of Webpack-specific comments
+	expectPrinted(t, "new Worker(// webpackFoo: 1\n // webpackBar: 2\n 'path');", "new Worker(\n  // webpackFoo: 1\n  // webpackBar: 2\n  \"path\"\n);\n")
+	expectPrinted(t, "new Worker(/* webpackFoo: 1 */ /* webpackBar: 2 */ 'path');", "new Worker(\n  /* webpackFoo: 1 */\n  /* webpackBar: 2 */\n  \"path\"\n);\n")
+	expectPrinted(t, "new Worker(\n    /* multi\n     * line\n     * webpackBar: */ 'path');", "new Worker(\n  /* multi\n   * line\n   * webpackBar: */\n  \"path\"\n);\n")
+	expectPrinted(t, "new Worker(/* webpackFoo: 1 */ 'path' /* webpackBar:2 */);", "new Worker(\n  /* webpackFoo: 1 */\n  \"path\"\n  /* webpackBar:2 */\n);\n")
+	expectPrinted(t, "new Worker(/* webpackFoo: 1 */ 'path' /* webpackBar:2 */ ,);", "new Worker(\n  /* webpackFoo: 1 */\n  \"path\"\n);\n") // Not currently handled
+	expectPrinted(t, "new Worker(/* webpackFoo: 1 */ 'path', /* webpackBar:2 */ );", "new Worker(\n  /* webpackFoo: 1 */\n  \"path\"\n  /* webpackBar:2 */\n);\n")
+	expectPrinted(t, "new Worker(new URL('path', /* webpackFoo: these can go anywhere */ import.meta.url))",
+		"new Worker(new URL(\n  \"path\",\n  /* webpackFoo: these can go anywhere */\n  import.meta.url\n));\n")
 }
 
 func TestCall(t *testing.T) {
@@ -337,7 +347,7 @@ func TestCall(t *testing.T) {
 	expectPrinted(t, "(1, eval)(x)", "(1, eval)(x);\n")
 	expectPrinted(t, "(1, eval)?.(x)", "(1, eval)?.(x);\n")
 	expectPrintedMangle(t, "(1 ? eval : 2)(x)", "(0, eval)(x);\n")
-	expectPrintedMangle(t, "(1 ? eval : 2)?.(x)", "(0, eval)?.(x);\n")
+	expectPrintedMangle(t, "(1 ? eval : 2)?.(x)", "eval?.(x);\n")
 
 	expectPrintedMinify(t, "eval?.(x)", "eval?.(x);")
 	expectPrintedMinify(t, "eval(x,y)", "eval(x,y);")
@@ -345,7 +355,7 @@ func TestCall(t *testing.T) {
 	expectPrintedMinify(t, "(1, eval)(x)", "(1,eval)(x);")
 	expectPrintedMinify(t, "(1, eval)?.(x)", "(1,eval)?.(x);")
 	expectPrintedMangleMinify(t, "(1 ? eval : 2)(x)", "(0,eval)(x);")
-	expectPrintedMangleMinify(t, "(1 ? eval : 2)?.(x)", "(0,eval)?.(x);")
+	expectPrintedMangleMinify(t, "(1 ? eval : 2)?.(x)", "eval?.(x);")
 }
 
 func TestMember(t *testing.T) {
@@ -533,6 +543,19 @@ func TestFunction(t *testing.T) {
 		"function foo([, ,] = [, ,]) {\n}\n")
 }
 
+func TestCommentsAndParentheses(t *testing.T) {
+	expectPrinted(t, "(/* foo */ { x() { foo() } }.x());", "/* foo */\n({ x() {\n  foo();\n} }).x();\n")
+	expectPrinted(t, "(/* foo */ function f() { foo(f) }());", "/* foo */\n(function f() {\n  foo(f);\n})();\n")
+	expectPrinted(t, "(/* foo */ class x { static y() { foo(x) } }.y());", "/* foo */\n(class x {\n  static y() {\n    foo(x);\n  }\n}).y();\n")
+	expectPrinted(t, "(/* @__PURE__ */ (() => foo())());", "/* @__PURE__ */ (() => foo())();\n")
+	expectPrinted(t, "export default (/* foo */ function f() {});", "export default (\n  /* foo */\n  function f() {\n  }\n);\n")
+	expectPrinted(t, "export default (/* foo */ class x {});", "export default (\n  /* foo */\n  class x {\n  }\n);\n")
+	expectPrinted(t, "x = () => (/* foo */ {});", "x = () => (\n  /* foo */\n  {}\n);\n")
+	expectPrinted(t, "for ((/* foo */ let).x of y) ;", "for (\n  /* foo */\n  (let).x of y\n)\n  ;\n")
+	expectPrinted(t, "for (/* foo */ (let).x of y) ;", "for (\n  /* foo */\n  (let).x of y\n)\n  ;\n")
+	expectPrinted(t, "function *x() { yield (/* foo */ y) }", "function* x() {\n  yield (\n    /* foo */\n    y\n  );\n}\n")
+}
+
 func TestPureComment(t *testing.T) {
 	expectPrinted(t,
 		"(function() {})",
@@ -667,11 +690,18 @@ func TestPrivateIdentifiers(t *testing.T) {
 func TestImport(t *testing.T) {
 	expectPrinted(t, "import('path');", "import(\"path\");\n") // The semicolon must not be a separate statement
 
-	// Test preservation of leading interior comments
-	expectPrinted(t, "import(// comment 1\n // comment 2\n 'path');", "import(\n  // comment 1\n  // comment 2\n  \"path\"\n);\n")
-	expectPrinted(t, "import(/* comment 1 */ /* comment 2 */ 'path');", "import(\n  /* comment 1 */\n  /* comment 2 */\n  \"path\"\n);\n")
-	expectPrinted(t, "import(\n    /* multi\n     * line\n     * comment */ 'path');", "import(\n  /* multi\n   * line\n   * comment */\n  \"path\"\n);\n")
-	expectPrinted(t, "import(/* comment 1 */ 'path' /* comment 2 */);", "import(\n  /* comment 1 */\n  \"path\"\n);\n")
+	// Test preservation of Webpack-specific comments
+	expectPrinted(t, "import(// webpackFoo: 1\n // webpackBar: 2\n 'path');", "import(\n  // webpackFoo: 1\n  // webpackBar: 2\n  \"path\"\n);\n")
+	expectPrinted(t, "import(// webpackFoo: 1\n // webpackBar: 2\n 'path', {type: 'module'});", "import(\n  // webpackFoo: 1\n  // webpackBar: 2\n  \"path\",\n  { type: \"module\" }\n);\n")
+	expectPrinted(t, "import(/* webpackFoo: 1 */ /* webpackBar: 2 */ 'path');", "import(\n  /* webpackFoo: 1 */\n  /* webpackBar: 2 */\n  \"path\"\n);\n")
+	expectPrinted(t, "import(/* webpackFoo: 1 */ /* webpackBar: 2 */ 'path', {type: 'module'});", "import(\n  /* webpackFoo: 1 */\n  /* webpackBar: 2 */\n  \"path\",\n  { type: \"module\" }\n);\n")
+	expectPrinted(t, "import(\n    /* multi\n     * line\n     * webpackBar: */ 'path');", "import(\n  /* multi\n   * line\n   * webpackBar: */\n  \"path\"\n);\n")
+	expectPrinted(t, "import(/* webpackFoo: 1 */ 'path' /* webpackBar:2 */);", "import(\n  /* webpackFoo: 1 */\n  \"path\"\n  /* webpackBar:2 */\n);\n")
+	expectPrinted(t, "import(/* webpackFoo: 1 */ 'path' /* webpackBar:2 */ ,);", "import(\n  /* webpackFoo: 1 */\n  \"path\"\n);\n") // Not currently handled
+	expectPrinted(t, "import(/* webpackFoo: 1 */ 'path', /* webpackBar:2 */ );", "import(\n  /* webpackFoo: 1 */\n  \"path\"\n  /* webpackBar:2 */\n);\n")
+	expectPrinted(t, "import(/* webpackFoo: 1 */ 'path', { type: 'module' } /* webpackBar:2 */ );", "import(\n  /* webpackFoo: 1 */\n  \"path\",\n  { type: \"module\" }\n  /* webpackBar:2 */\n);\n")
+	expectPrinted(t, "import(new URL('path', /* webpackFoo: these can go anywhere */ import.meta.url))",
+		"import(new URL(\n  \"path\",\n  /* webpackFoo: these can go anywhere */\n  import.meta.url\n));\n")
 }
 
 func TestExportDefault(t *testing.T) {
@@ -934,6 +964,22 @@ func TestJSX(t *testing.T) {
 	expectPrintedJSXMinify(t, "<a>{' x '}{'<b/>'}{' y '}</a>", "<a> x {\"<b/>\"} y </a>;")
 }
 
+func TestJSXSingleLine(t *testing.T) {
+	expectPrintedJSX(t, "<x/>", "<x />;\n")
+	expectPrintedJSX(t, "<x y/>", "<x y />;\n")
+	expectPrintedJSX(t, "<x\n/>", "<x />;\n")
+	expectPrintedJSX(t, "<x\ny/>", "<x\n  y\n/>;\n")
+	expectPrintedJSX(t, "<x y\n/>", "<x\n  y\n/>;\n")
+	expectPrintedJSX(t, "<x\n{...y}/>", "<x\n  {...y}\n/>;\n")
+
+	expectPrintedJSXMinify(t, "<x/>", "<x/>;")
+	expectPrintedJSXMinify(t, "<x y/>", "<x y/>;")
+	expectPrintedJSXMinify(t, "<x\n/>", "<x/>;")
+	expectPrintedJSXMinify(t, "<x\ny/>", "<x y/>;")
+	expectPrintedJSXMinify(t, "<x y\n/>", "<x y/>;")
+	expectPrintedJSXMinify(t, "<x\n{...y}/>", "<x{...y}/>;")
+}
+
 func TestAvoidSlashScript(t *testing.T) {
 	// Positive cases
 	expectPrinted(t, "x = '</script'", "x = \"<\\/script\";\n")
@@ -953,15 +999,15 @@ func TestAvoidSlashScript(t *testing.T) {
 	expectPrinted(t, "/*! </SCRIPT \n </SCRIPT */", "/*! <\\/SCRIPT \n <\\/SCRIPT */\n")
 	expectPrinted(t, "/*! </ScRiPt \n </ScRiPt */", "/*! <\\/ScRiPt \n <\\/ScRiPt */\n")
 	expectPrinted(t, "String.raw`</script`",
-		"var _a;\nString.raw(_a || (_a = __template([\"<\\/script\"])));\nimport {\n  __template\n} from \"<runtime>\";\n")
+		"import { __template } from \"<runtime>\";\nvar _a;\nString.raw(_a || (_a = __template([\"<\\/script\"])));\n")
 	expectPrinted(t, "String.raw`</script${a}`",
-		"var _a;\nString.raw(_a || (_a = __template([\"<\\/script\", \"\"])), a);\nimport {\n  __template\n} from \"<runtime>\";\n")
+		"import { __template } from \"<runtime>\";\nvar _a;\nString.raw(_a || (_a = __template([\"<\\/script\", \"\"])), a);\n")
 	expectPrinted(t, "String.raw`${a}</script`",
-		"var _a;\nString.raw(_a || (_a = __template([\"\", \"<\\/script\"])), a);\nimport {\n  __template\n} from \"<runtime>\";\n")
+		"import { __template } from \"<runtime>\";\nvar _a;\nString.raw(_a || (_a = __template([\"\", \"<\\/script\"])), a);\n")
 	expectPrinted(t, "String.raw`</SCRIPT`",
-		"var _a;\nString.raw(_a || (_a = __template([\"<\\/SCRIPT\"])));\nimport {\n  __template\n} from \"<runtime>\";\n")
+		"import { __template } from \"<runtime>\";\nvar _a;\nString.raw(_a || (_a = __template([\"<\\/SCRIPT\"])));\n")
 	expectPrinted(t, "String.raw`</ScRiPt`",
-		"var _a;\nString.raw(_a || (_a = __template([\"<\\/ScRiPt\"])));\nimport {\n  __template\n} from \"<runtime>\";\n")
+		"import { __template } from \"<runtime>\";\nvar _a;\nString.raw(_a || (_a = __template([\"<\\/ScRiPt\"])));\n")
 
 	// Negative cases
 	expectPrinted(t, "x = '</'", "x = \"</\";\n")

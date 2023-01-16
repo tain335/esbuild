@@ -16,7 +16,6 @@ import (
 	"github.com/evanw/esbuild/internal/fs"
 	"github.com/evanw/esbuild/internal/helpers"
 	"github.com/evanw/esbuild/internal/js_ast"
-	"github.com/evanw/esbuild/internal/js_printer"
 	"github.com/evanw/esbuild/internal/logger"
 )
 
@@ -102,8 +101,10 @@ type ResolveResult struct {
 	PluginData interface{}
 
 	// If not empty, these should override the default values
-	JSXFactory  []string // Default if empty: "React.createElement"
-	JSXFragment []string // Default if empty: "React.Fragment"
+	JSXFactory      []string // Default if empty: "React.createElement"
+	JSXFragment     []string // Default if empty: "React.Fragment"
+	JSXImportSource string   // Default if empty: "react"
+	JSX             config.TSJSX
 
 	DifferentCase *fs.DifferentCase
 
@@ -127,17 +128,30 @@ type ResolveResult struct {
 	UnusedImportFlagsTS config.UnusedImportFlagsTS
 }
 
+type suggestionRange uint8
+
+const (
+	suggestionRangeFull suggestionRange = iota
+	suggestionRangeEnd
+)
+
 type DebugMeta struct {
-	suggestionText    string
-	suggestionMessage string
-	notes             []logger.MsgData
+	notes              []logger.MsgData
+	suggestionText     string
+	suggestionMessage  string
+	suggestionRange    suggestionRange
+	ModifiedImportPath string
 }
 
 func (dm DebugMeta) LogErrorMsg(log logger.Log, source *logger.Source, r logger.Range, text string, suggestion string, notes []logger.MsgData) {
 	tracker := logger.MakeLineColumnTracker(source)
 
 	if source != nil && dm.suggestionMessage != "" {
-		data := tracker.MsgData(r, dm.suggestionMessage)
+		suggestionRange := r
+		if dm.suggestionRange == suggestionRangeEnd {
+			suggestionRange = logger.Range{Loc: logger.Loc{Start: r.End() - 1}}
+		}
+		data := tracker.MsgData(suggestionRange, dm.suggestionMessage)
 		data.Location.Suggestion = dm.suggestionText
 		dm.notes = append(dm.notes, data)
 	}
@@ -155,17 +169,7 @@ func (dm DebugMeta) LogErrorMsg(log logger.Log, source *logger.Source, r logger.
 	log.AddMsg(msg)
 }
 
-type Resolver interface {
-	Resolve(sourceDir string, importPath string, kind ast.ImportKind) (result *ResolveResult, debug DebugMeta)
-	ResolveAbs(absPath string) *ResolveResult
-	PrettyPath(path logger.Path) string
-
-	// This tries to run "Resolve" on a package path as a relative path. If
-	// successful, the user just forgot a leading "./" in front of the path.
-	ProbeResolvePackageAsRelative(sourceDir string, importPath string, kind ast.ImportKind) *ResolveResult
-}
-
-type resolver struct {
+type Resolver struct {
 	fs     fs.FS
 	log    logger.Log
 	caches *cache.CacheSet
@@ -204,6 +208,9 @@ type resolver struct {
 	// all parent directories
 	dirCache map[string]*dirInfo
 
+	pnpManifestWasChecked bool
+	pnpManifest           *pnpData
+
 	options config.Options
 
 	// This mutex serves two purposes. First of all, it guards access to "dirCache"
@@ -218,14 +225,14 @@ type resolver struct {
 }
 
 type resolverQuery struct {
-	*resolver
+	*Resolver
 	moduleSuffixes []string
 	debugMeta      *DebugMeta
 	debugLogs      *debugLogs
 	kind           ast.ImportKind
 }
 
-func NewResolver(fs fs.FS, log logger.Log, caches *cache.CacheSet, options config.Options) Resolver {
+func NewResolver(fs fs.FS, log logger.Log, caches *cache.CacheSet, options config.Options) *Resolver {
 	// Filter out non-CSS extensions for CSS "@import" imports
 	atImportExtensionOrder := make([]string, 0, len(options.ExtensionOrder))
 	for _, ext := range options.ExtensionOrder {
@@ -253,7 +260,9 @@ func NewResolver(fs fs.FS, log logger.Log, caches *cache.CacheSet, options confi
 		esmConditionsRequire[key] = true
 	}
 
-	return &resolver{
+	fs.Cwd()
+
+	return &Resolver{
 		fs:                     fs,
 		log:                    log,
 		options:                options,
@@ -266,10 +275,10 @@ func NewResolver(fs fs.FS, log logger.Log, caches *cache.CacheSet, options confi
 	}
 }
 
-func (rr *resolver) Resolve(sourceDir string, importPath string, kind ast.ImportKind) (*ResolveResult, DebugMeta) {
+func (res *Resolver) Resolve(sourceDir string, importPath string, kind ast.ImportKind) (*ResolveResult, DebugMeta) {
 	var debugMeta DebugMeta
 	r := resolverQuery{
-		resolver:  rr,
+		Resolver:  res,
 		debugMeta: &debugMeta,
 		kind:      kind,
 	}
@@ -279,8 +288,53 @@ func (rr *resolver) Resolve(sourceDir string, importPath string, kind ast.Import
 			importPath, sourceDir, kind.StringForMetafile())}
 	}
 
+	// Apply package alias substitutions first
+	if r.options.PackageAliases != nil && IsPackagePath(importPath) {
+		if r.debugLogs != nil {
+			r.debugLogs.addNote("Checking for package alias matches")
+		}
+		foundMatch := false
+		for key, value := range r.options.PackageAliases {
+			if strings.HasPrefix(importPath, key) && (len(importPath) == len(key) || importPath[len(key)] == '/') {
+				// Resolve the package using the current path instead of the original
+				// path. This is trying to resolve the substitute in the top-level
+				// package instead of the nested package, which lets the top-level
+				// package control the version of the substitution. It's also critical
+				// when using Yarn PnP because Yarn PnP doesn't allow nested packages
+				// to "reach outside" of their normal dependency lists.
+				sourceDir = r.fs.Cwd()
+				if tail := importPath[len(key):]; tail != "/" {
+					// Don't include the trailing characters if they are equal to a
+					// single slash. This comes up because you can abuse this quirk of
+					// node's path resolution to force node to load the package from the
+					// file system instead of as a built-in module. For example, "util"
+					// is node's built-in module while "util/" is one on the file system.
+					// Leaving the trailing slash in place causes problems for people:
+					// https://github.com/evanw/esbuild/issues/2730. It should be ok to
+					// always strip the trailing slash even when using the alias feature
+					// to swap one package for another (except when you swap a reference
+					// to one built-in node module with another but really why would you
+					// do that).
+					value += tail
+				}
+				debugMeta.ModifiedImportPath = value
+				if r.debugLogs != nil {
+					r.debugLogs.addNote(fmt.Sprintf("  Matched with alias from %q to %q", key, value))
+					r.debugLogs.addNote(fmt.Sprintf("  Modified import path from %q to %q", importPath, debugMeta.ModifiedImportPath))
+					r.debugLogs.addNote(fmt.Sprintf("  Changed resolve directory to %q", sourceDir))
+				}
+				importPath = debugMeta.ModifiedImportPath
+				foundMatch = true
+				break
+			}
+		}
+		if r.debugLogs != nil && !foundMatch {
+			r.debugLogs.addNote("  Failed to find any package alias matches")
+		}
+	}
+
 	// Certain types of URLs default to being external for convenience
-	if isExplicitlyExternal := r.isExternal(r.options.ExternalSettings.PreResolve, importPath); isExplicitlyExternal ||
+	if isExplicitlyExternal := r.isExternal(r.options.ExternalSettings.PreResolve, importPath, kind); isExplicitlyExternal ||
 
 		// "fill: url(#filter);"
 		(kind == ast.ImportURL && strings.HasPrefix(importPath, "#")) ||
@@ -300,6 +354,19 @@ func (rr *resolver) Resolve(sourceDir string, importPath string, kind ast.Import
 			} else {
 				r.debugLogs.addNote("Marking this path as implicitly external")
 			}
+		}
+
+		r.flushDebugLogs(flushDueToSuccess)
+		return &ResolveResult{
+			PathPair:   PathPair{Primary: logger.Path{Text: importPath}},
+			IsExternal: true,
+		}, debugMeta
+	}
+
+	// "import 'pkg'" when all packages are external (vs. "import './pkg'")
+	if r.options.ExternalPackages && IsPackagePath(importPath) && !r.fs.IsAbs(importPath) && !strings.HasPrefix(importPath, "#") {
+		if r.debugLogs != nil {
+			r.debugLogs.addNote("Marking this path as external because it's a package path")
 		}
 
 		r.flushDebugLogs(flushDueToSuccess)
@@ -408,6 +475,33 @@ func (rr *resolver) Resolve(sourceDir string, importPath string, kind ast.Import
 	defer r.mutex.Unlock()
 	sourceDirInfo := r.loadModuleSuffixesForSourceDir(sourceDir)
 
+	// Check for the Yarn PnP manifest if it hasn't already been checked for
+	if !r.pnpManifestWasChecked {
+		r.pnpManifestWasChecked = true
+
+		// Use the current working directory to find the Yarn PnP manifest. We
+		// can't necessarily use the entry point locations because the entry
+		// point locations aren't necessarily file paths. For example, they could
+		// be HTTP URLs that will be handled by a plugin.
+		for dirInfo := r.dirInfoCached(r.fs.Cwd()); dirInfo != nil; dirInfo = dirInfo.parent {
+			if absPath := dirInfo.pnpManifestAbsPath; absPath != "" {
+				if strings.HasSuffix(absPath, ".json") {
+					if json, source := r.extractYarnPnPDataFromJSON(absPath, pnpReportErrorsAboutMissingFiles); json.Data != nil {
+						r.pnpManifest = compileYarnPnPData(absPath, r.fs.Dir(absPath), json, source)
+					}
+				} else {
+					if json, source := r.tryToExtractYarnPnPDataFromJS(absPath, pnpReportErrorsAboutMissingFiles); json.Data != nil {
+						r.pnpManifest = compileYarnPnPData(absPath, r.fs.Dir(absPath), json, source)
+					}
+				}
+				if r.debugLogs != nil && r.pnpManifest != nil && r.pnpManifest.invalidIgnorePatternData != "" {
+					r.debugLogs.addNote("  Invalid Go regular expression for \"ignorePatternData\": " + r.pnpManifest.invalidIgnorePatternData)
+				}
+				break
+			}
+		}
+	}
+
 	result := r.resolveWithoutSymlinks(sourceDir, sourceDirInfo, importPath)
 	if result == nil {
 		// If resolution failed, try again with the URL query and/or hash removed
@@ -459,7 +553,11 @@ func (r *resolverQuery) loadModuleSuffixesForSourceDir(sourceDir string) *dirInf
 	return sourceDirInfo
 }
 
-func (r resolverQuery) isExternal(matchers config.ExternalMatchers, path string) bool {
+func (r resolverQuery) isExternal(matchers config.ExternalMatchers, path string, kind ast.ImportKind) bool {
+	if kind == ast.ImportEntryPoint {
+		// Never mark an entry point as external. This is not useful.
+		return false
+	}
 	if _, ok := matchers.Exact[path]; ok {
 		return true
 	}
@@ -476,8 +574,8 @@ func (r resolverQuery) isExternal(matchers config.ExternalMatchers, path string)
 	return false
 }
 
-func (rr *resolver) ResolveAbs(absPath string) *ResolveResult {
-	r := resolverQuery{resolver: rr}
+func (res *Resolver) ResolveAbs(absPath string) *ResolveResult {
+	r := resolverQuery{Resolver: res}
 	if r.log.Level <= logger.LevelDebug {
 		r.debugLogs = &debugLogs{what: fmt.Sprintf("Getting metadata for absolute path %s", absPath)}
 	}
@@ -492,9 +590,11 @@ func (rr *resolver) ResolveAbs(absPath string) *ResolveResult {
 	return result
 }
 
-func (rr *resolver) ProbeResolvePackageAsRelative(sourceDir string, importPath string, kind ast.ImportKind) *ResolveResult {
+// This tries to run "Resolve" on a package path as a relative path. If
+// successful, the user just forgot a leading "./" in front of the path.
+func (res *Resolver) ProbeResolvePackageAsRelative(sourceDir string, importPath string, kind ast.ImportKind) *ResolveResult {
 	r := resolverQuery{
-		resolver: rr,
+		Resolver: res,
 		kind:     kind,
 	}
 	absPath := r.fs.Join(sourceDir, importPath)
@@ -552,7 +652,7 @@ func (r resolverQuery) flushDebugLogs(mode flushMode) {
 }
 
 func (r resolverQuery) finalizeResolve(result *ResolveResult) {
-	if !result.IsExternal && r.isExternal(r.options.ExternalSettings.PostResolve, result.PathPair.Primary.Text) {
+	if !result.IsExternal && r.isExternal(r.options.ExternalSettings.PostResolve, result.PathPair.Primary.Text, r.kind) {
 		if r.debugLogs != nil {
 			r.debugLogs.addNote(fmt.Sprintf("The path %q was marked as external by the user", result.PathPair.Primary.Text))
 		}
@@ -577,13 +677,14 @@ func (r resolverQuery) finalizeResolve(result *ResolveResult) {
 				if pkgJSON := dirInfo.enclosingPackageJSON; pkgJSON != nil && *path == result.PathPair.Primary {
 					if pkgJSON.sideEffectsMap != nil {
 						hasSideEffects := false
-						if pkgJSON.sideEffectsMap[path.Text] {
+						pathLookup := strings.ReplaceAll(path.Text, "\\", "/") // Avoid problems with Windows-style slashes
+						if pkgJSON.sideEffectsMap[pathLookup] {
 							// Fast path: map lookup
 							hasSideEffects = true
 						} else {
 							// Slow path: glob tests
 							for _, re := range pkgJSON.sideEffectsRegexps {
-								if re.MatchString(path.Text) {
+								if re.MatchString(pathLookup) {
 									hasSideEffects = true
 									break
 								}
@@ -627,18 +728,15 @@ func (r resolverQuery) finalizeResolve(result *ResolveResult) {
 					} else {
 						result.JSXFactory = dirInfo.enclosingTSConfigJSON.JSXFactory
 						result.JSXFragment = dirInfo.enclosingTSConfigJSON.JSXFragmentFactory
+						result.JSX = dirInfo.enclosingTSConfigJSON.JSX
+						result.JSXImportSource = dirInfo.enclosingTSConfigJSON.JSXImportSource
 						result.UseDefineForClassFieldsTS = dirInfo.enclosingTSConfigJSON.UseDefineForClassFields
 						result.UnusedImportFlagsTS = config.UnusedImportFlagsFromTsconfigValues(
 							dirInfo.enclosingTSConfigJSON.PreserveImportsNotUsedAsValues,
 							dirInfo.enclosingTSConfigJSON.PreserveValueImports,
 						)
 						result.TSTarget = dirInfo.enclosingTSConfigJSON.TSTarget
-						if tsAlwaysStrict := dirInfo.enclosingTSConfigJSON.TSAlwaysStrict; tsAlwaysStrict != nil {
-							result.TSAlwaysStrict = tsAlwaysStrict
-						} else {
-							// If "alwaysStrict" is absent, it defaults to "strict" instead
-							result.TSAlwaysStrict = dirInfo.enclosingTSConfigJSON.TSStrict
-						}
+						result.TSAlwaysStrict = dirInfo.enclosingTSConfigJSON.TSAlwaysStrictOrStrict()
 
 						if r.debugLogs != nil {
 							r.debugLogs.addNote(fmt.Sprintf("This import is under the effect of %q",
@@ -731,7 +829,7 @@ func (r resolverQuery) resolveWithoutSymlinks(sourceDir string, sourceDirInfo *d
 		absPath := r.fs.Join(sourceDir, importPath)
 
 		// Check for external packages first
-		if r.isExternal(r.options.ExternalSettings.PostResolve, absPath) {
+		if r.isExternal(r.options.ExternalSettings.PostResolve, absPath, r.kind) {
 			if r.debugLogs != nil {
 				r.debugLogs.addNote(fmt.Sprintf("The path %q was marked as external by the user", absPath))
 			}
@@ -808,9 +906,9 @@ func (r resolverQuery) resolveWithoutRemapping(sourceDirInfo *dirInfo, importPat
 	}
 }
 
-func (r *resolver) PrettyPath(path logger.Path) string {
+func PrettyPath(fs fs.FS, path logger.Path) string {
 	if path.Namespace == "file" {
-		if rel, ok := r.fs.Rel(r.fs.Cwd(), path.Text); ok {
+		if rel, ok := fs.Rel(fs.Cwd(), path.Text); ok {
 			path.Text = rel
 		}
 
@@ -844,6 +942,7 @@ type dirInfo struct {
 
 	// All relevant information about this directory
 	absPath               string
+	pnpManifestAbsPath    string
 	entries               fs.DirEntries
 	packageJSON           *packageJSON  // Is there a "package.json" file in this directory?
 	enclosingPackageJSON  *packageJSON  // Is there a "package.json" file in this directory or a parent directory?
@@ -871,7 +970,7 @@ func (r resolverQuery) dirInfoCached(path string) *dirInfo {
 		if cached == nil {
 			r.debugLogs.addNote(fmt.Sprintf("Failed to read directory %q", path))
 		} else {
-			count := len(cached.entries.SortedKeys())
+			count := cached.entries.PeekEntryCount()
 			entries := "entries"
 			if count == 1 {
 				entries = "entry"
@@ -913,19 +1012,70 @@ func (r resolverQuery) parseTSConfig(file string, visited map[string]bool) (*TSC
 	keyPath := logger.Path{Text: file, Namespace: "file"}
 	source := logger.Source{
 		KeyPath:    keyPath,
-		PrettyPath: r.PrettyPath(keyPath),
+		PrettyPath: PrettyPath(r.fs, keyPath),
 		Contents:   contents,
 	}
 	tracker := logger.MakeLineColumnTracker(&source)
 	fileDir := r.fs.Dir(file)
 
 	result := ParseTSConfigJSON(r.log, source, &r.caches.JSONCache, func(extends string, extendsRange logger.Range) *TSConfigJSON {
+		// Note: This doesn't use the normal node module resolution algorithm
+		// both because it's different (e.g. we don't want to match a directory)
+		// and because it would deadlock since we're currently in the middle of
+		// populating the directory info cache.
+
+		// Check for a Yarn PnP manifest and use that to rewrite the path
 		if IsPackagePath(extends) {
-			// If this is a package path, try to resolve it to a "node_modules"
-			// folder. This doesn't use the normal node module resolution algorithm
-			// both because it's different (e.g. we don't want to match a directory)
-			// and because it would deadlock since we're currently in the middle of
-			// populating the directory info cache.
+			pnpData := r.pnpManifest
+
+			// If we haven't loaded the Yarn PnP manifest yet, try to find one
+			if pnpData == nil {
+				current := fileDir
+				for {
+					if _, _, ok := fs.ParseYarnPnPVirtualPath(current); !ok {
+						absPath := r.fs.Join(current, ".pnp.data.json")
+						if json, source := r.extractYarnPnPDataFromJSON(absPath, pnpIgnoreErrorsAboutMissingFiles); json.Data != nil {
+							pnpData = compileYarnPnPData(absPath, current, json, source)
+							break
+						}
+
+						absPath = r.fs.Join(current, ".pnp.cjs")
+						if json, source := r.tryToExtractYarnPnPDataFromJS(absPath, pnpIgnoreErrorsAboutMissingFiles); json.Data != nil {
+							pnpData = compileYarnPnPData(absPath, current, json, source)
+							break
+						}
+
+						absPath = r.fs.Join(current, ".pnp.js")
+						if json, source := r.tryToExtractYarnPnPDataFromJS(absPath, pnpIgnoreErrorsAboutMissingFiles); json.Data != nil {
+							pnpData = compileYarnPnPData(absPath, current, json, source)
+							break
+						}
+					}
+
+					// Go to the parent directory, stopping at the file system root
+					next := r.fs.Dir(current)
+					if current == next {
+						break
+					}
+					current = next
+				}
+			}
+
+			if pnpData != nil {
+				if result := r.resolveToUnqualified(extends, fileDir, pnpData); result.status == pnpErrorGeneric {
+					if r.debugLogs != nil {
+						r.debugLogs.addNote("The Yarn PnP path resolution algorithm returned an error")
+					}
+					goto pnpError
+				} else if result.status == pnpSuccess {
+					// Continue with the module resolution algorithm from node.js
+					extends = r.fs.Join(result.pkgDirPath, result.pkgSubpath)
+				}
+			}
+		}
+
+		if IsPackagePath(extends) && !r.fs.IsAbs(extends) {
+			// If this is still a package path, try to resolve it to a "node_modules" directory
 			current := fileDir
 			for {
 				// Skip "node_modules" folders
@@ -934,6 +1084,16 @@ func (r resolverQuery) parseTSConfig(file string, visited map[string]bool) (*TSC
 					filesToCheck := []string{r.fs.Join(join, "tsconfig.json"), join, join + ".json"}
 					for _, fileToCheck := range filesToCheck {
 						base, err := r.parseTSConfig(fileToCheck, visited)
+
+						// Explicitly ignore matches if they are directories instead of files
+						if err != nil && err != syscall.ENOENT {
+							if entries, _, dirErr := r.fs.ReadDirectory(r.fs.Dir(fileToCheck)); dirErr == nil {
+								if entry, _ := entries.Get(r.fs.Base(fileToCheck)); entry != nil && entry.Kind(r.fs) == fs.DirEntry {
+									continue
+								}
+							}
+						}
+
 						if err == nil {
 							return base
 						} else if err == syscall.ENOENT {
@@ -944,7 +1104,7 @@ func (r resolverQuery) parseTSConfig(file string, visited map[string]bool) (*TSC
 						} else if err != errParseErrorAlreadyLogged {
 							r.log.AddError(&tracker, extendsRange,
 								fmt.Sprintf("Cannot read file %q: %s",
-									r.PrettyPath(logger.Path{Text: fileToCheck, Namespace: "file"}), err.Error()))
+									PrettyPath(r.fs, logger.Path{Text: fileToCheck, Namespace: "file"}), err.Error()))
 						}
 						return nil
 					}
@@ -958,30 +1118,64 @@ func (r resolverQuery) parseTSConfig(file string, visited map[string]bool) (*TSC
 				current = next
 			}
 		} else {
-			// If this is a regular path, search relative to the enclosing directory
 			extendsFile := extends
-			if !r.fs.IsAbs(extends) {
-				extendsFile = r.fs.Join(fileDir, extends)
+
+			// The TypeScript compiler has a strange behavior that seems like a bug
+			// where "." and ".." behave differently than other forms such as "./."
+			// or "../." and are interpreted as having an implicit "tsconfig.json"
+			// suffix.
+			//
+			// I believe their bug is caused by some parts of their code checking for
+			// relative paths using the literal "./" and "../" prefixes (requiring
+			// the slash) and other parts checking using the regular expression
+			// /^\.\.?($|[\\/])/ (with the slash optional).
+			//
+			// In any case, people are now relying on this behavior. One example is
+			// this: https://github.com/esbuild-kit/tsx/pull/158. So we replicate this
+			// bug in esbuild as well.
+			if extendsFile == "." || extendsFile == ".." {
+				extendsFile += "/tsconfig.json"
 			}
-			for _, fileToCheck := range []string{extendsFile, extendsFile + ".json"} {
-				base, err := r.parseTSConfig(fileToCheck, visited)
-				if err == nil {
-					return base
-				} else if err == syscall.ENOENT {
-					continue
-				} else if err == errParseErrorImportCycle {
+
+			// If this is a regular path, search relative to the enclosing directory
+			if !r.fs.IsAbs(extendsFile) {
+				extendsFile = r.fs.Join(fileDir, extendsFile)
+			}
+			base, err := r.parseTSConfig(extendsFile, visited)
+
+			// TypeScript's handling of "extends" has some specific edge cases. We
+			// must only try adding ".json" if it's not already present, which is
+			// unlike how node path resolution works. We also need to explicitly
+			// ignore matches if they are directories instead of files. Some users
+			// name directories the same name as their config files.
+			if err != nil && !strings.HasSuffix(extendsFile, ".json") {
+				if entries, _, dirErr := r.fs.ReadDirectory(r.fs.Dir(extendsFile)); dirErr == nil {
+					extendsBase := r.fs.Base(extendsFile)
+					if entry, _ := entries.Get(extendsBase); entry == nil || entry.Kind(r.fs) != fs.FileEntry {
+						if entry, _ := entries.Get(extendsBase + ".json"); entry != nil && entry.Kind(r.fs) == fs.FileEntry {
+							base, err = r.parseTSConfig(extendsFile+".json", visited)
+						}
+					}
+				}
+			}
+
+			if err == nil {
+				return base
+			} else if err != syscall.ENOENT {
+				if err == errParseErrorImportCycle {
 					r.log.AddID(logger.MsgID_TsconfigJSON_Cycle, logger.Warning, &tracker, extendsRange,
 						fmt.Sprintf("Base config file %q forms cycle", extends))
 				} else if err != errParseErrorAlreadyLogged {
 					r.log.AddError(&tracker, extendsRange,
 						fmt.Sprintf("Cannot read file %q: %s",
-							r.PrettyPath(logger.Path{Text: fileToCheck, Namespace: "file"}), err.Error()))
+							PrettyPath(r.fs, logger.Path{Text: extendsFile, Namespace: "file"}), err.Error()))
 				}
 				return nil
 			}
 		}
 
 		// Suppress warnings about missing base config files inside "node_modules"
+	pnpError:
 		if !helpers.IsInsideNodeModules(file) {
 			r.log.AddID(logger.MsgID_TsconfigJSON_Missing, logger.Warning, &tracker, extendsRange,
 				fmt.Sprintf("Cannot find base config file %q", extends))
@@ -1063,7 +1257,7 @@ func (r resolverQuery) dirInfoUncached(path string) *dirInfo {
 		if err != syscall.ENOENT && err != syscall.ENOTDIR {
 			r.log.AddError(nil, logger.Range{},
 				fmt.Sprintf("Cannot read directory %q: %s",
-					r.PrettyPath(logger.Path{Text: path, Namespace: "file"}), err.Error()))
+					PrettyPath(r.fs, logger.Path{Text: path, Namespace: "file"}), err.Error()))
 		}
 		return nil
 	}
@@ -1138,12 +1332,47 @@ func (r resolverQuery) dirInfoUncached(path string) *dirInfo {
 			if err != nil {
 				if err == syscall.ENOENT {
 					r.log.AddError(nil, logger.Range{}, fmt.Sprintf("Cannot find tsconfig file %q",
-						r.PrettyPath(logger.Path{Text: tsConfigPath, Namespace: "file"})))
+						PrettyPath(r.fs, logger.Path{Text: tsConfigPath, Namespace: "file"})))
 				} else if err != errParseErrorAlreadyLogged {
 					r.log.AddID(logger.MsgID_TsconfigJSON_Missing, logger.Debug, nil, logger.Range{},
 						fmt.Sprintf("Cannot read file %q: %s",
-							r.PrettyPath(logger.Path{Text: tsConfigPath, Namespace: "file"}), err.Error()))
+							PrettyPath(r.fs, logger.Path{Text: tsConfigPath, Namespace: "file"}), err.Error()))
 				}
+			}
+		}
+	}
+
+	// Record if this directory has a Yarn PnP manifest. This must not be done
+	// for Yarn virtual paths because that will result in duplicate copies of
+	// the same manifest which will result in multiple copies of the same virtual
+	// directory in the same path, which we don't handle (and which also doesn't
+	// match Yarn's behavior).
+	//
+	// For example, imagine a project with a manifest here:
+	//
+	//   /project/.pnp.cjs
+	//
+	// and a source file with an import of "bar" here:
+	//
+	//   /project/.yarn/__virtual__/pkg/1/foo.js
+	//
+	// If we didn't ignore Yarn PnP manifests in virtual folders, then we would
+	// pick up on the one here:
+	//
+	//   /project/.yarn/__virtual__/pkg/1/.pnp.cjs
+	//
+	// which means we would potentially resolve the import to something like this:
+	//
+	//   /project/.yarn/__virtual__/pkg/1/.yarn/__virtual__/pkg/1/bar
+	//
+	if r.pnpManifest == nil {
+		if _, _, ok := fs.ParseYarnPnPVirtualPath(path); !ok {
+			if pnp, _ := entries.Get(".pnp.data.json"); pnp != nil && pnp.Kind(r.fs) == fs.FileEntry {
+				info.pnpManifestAbsPath = r.fs.Join(path, ".pnp.data.json")
+			} else if pnp, _ := entries.Get(".pnp.cjs"); pnp != nil && pnp.Kind(r.fs) == fs.FileEntry {
+				info.pnpManifestAbsPath = r.fs.Join(path, ".pnp.cjs")
+			} else if pnp, _ := entries.Get(".pnp.js"); pnp != nil && pnp.Kind(r.fs) == fs.FileEntry {
+				info.pnpManifestAbsPath = r.fs.Join(path, ".pnp.js")
 			}
 		}
 	}
@@ -1151,9 +1380,9 @@ func (r resolverQuery) dirInfoUncached(path string) *dirInfo {
 	return info
 }
 
-// https://devblogs.microsoft.com/typescript/announcing-typescript-4-7-beta/#resolution-customization-with-modulesuffixes
-// "Note that the empty string '' in moduleSuffixes is necessary for TypeScript to
-// also look-up ./foo.ts. In a sense, the default value for moduleSuffixes is ['']."
+// From: https://devblogs.microsoft.com/typescript/announcing-typescript-4-7-beta/#resolution-customization-with-modulesuffixes
+// Note that the empty string "" in moduleSuffixes is necessary for TypeScript to
+// also look-up ./foo.ts. In a sense, the default value for moduleSuffixes is [""].
 var defaultModuleSuffixes = []string{""}
 
 var rewrittenFileExtensions = map[string][]string{
@@ -1193,8 +1422,8 @@ func (r resolverQuery) loadAsFile(path string, extensionOrder []string) (string,
 	if err != nil {
 		if err != syscall.ENOENT {
 			r.log.AddError(nil, logger.Range{},
-				fmt.Sprintf("  Cannot read directory %q: %s",
-					r.PrettyPath(logger.Path{Text: dirPath, Namespace: "file"}), err.Error()))
+				fmt.Sprintf("Cannot read directory %q: %s",
+					PrettyPath(r.fs, logger.Path{Text: dirPath, Namespace: "file"}), err.Error()))
 		}
 		return "", false, nil
 	}
@@ -1337,18 +1566,18 @@ func (r resolverQuery) loadAsFile(path string, extensionOrder []string) (string,
 	return "", false, nil
 }
 
-func (r resolverQuery) loadAsIndex(dirInfo *dirInfo, path string, extensionOrder []string) (PathPair, bool, *fs.DifferentCase) {
+func (r resolverQuery) loadAsIndex(dirInfo *dirInfo, extensionOrder []string) (PathPair, bool, *fs.DifferentCase) {
 	// Try the "index" file with extensions
 	for _, ext := range extensionOrder {
 		base := "index" + ext
 		if entry, diffCase := dirInfo.entries.Get(base); entry != nil && entry.Kind(r.fs) == fs.FileEntry {
 			if r.debugLogs != nil {
-				r.debugLogs.addNote(fmt.Sprintf("Found file %q", r.fs.Join(path, base)))
+				r.debugLogs.addNote(fmt.Sprintf("Found file %q", r.fs.Join(dirInfo.absPath, base)))
 			}
-			return PathPair{Primary: logger.Path{Text: r.fs.Join(path, base), Namespace: "file"}}, true, diffCase
+			return PathPair{Primary: logger.Path{Text: r.fs.Join(dirInfo.absPath, base), Namespace: "file"}}, true, diffCase
 		}
 		if r.debugLogs != nil {
-			r.debugLogs.addNote(fmt.Sprintf("Failed to find file %q", r.fs.Join(path, base)))
+			r.debugLogs.addNote(fmt.Sprintf("Failed to find file %q", r.fs.Join(dirInfo.absPath, base)))
 		}
 	}
 
@@ -1372,7 +1601,7 @@ func (r resolverQuery) loadAsIndexWithBrowserRemapping(dirInfo *dirInfo, path st
 
 		// Is it a directory with an index?
 		if fieldDirInfo := r.dirInfoCached(remappedAbs); fieldDirInfo != nil {
-			if absolute, ok, _ := r.loadAsIndex(fieldDirInfo, remappedAbs, extensionOrder); ok {
+			if absolute, ok, _ := r.loadAsIndex(fieldDirInfo, extensionOrder); ok {
 				return absolute, true, nil
 			}
 		}
@@ -1380,7 +1609,7 @@ func (r resolverQuery) loadAsIndexWithBrowserRemapping(dirInfo *dirInfo, path st
 		return PathPair{}, false, nil
 	}
 
-	return r.loadAsIndex(dirInfo, path, extensionOrder)
+	return r.loadAsIndex(dirInfo, extensionOrder)
 }
 
 func getProperty(json js_ast.Expr, name string) (js_ast.Expr, logger.Loc, bool) {
@@ -1854,6 +2083,61 @@ func (r resolverQuery) loadNodeModules(importPath string, dirInfo *dirInfo, forb
 		return r.loadPackageImports(importPath, dirInfoPackageJSON)
 	}
 
+	// If Yarn PnP is active, use it to find the package
+	if r.pnpManifest != nil {
+		if result := r.resolveToUnqualified(importPath, dirInfo.absPath, r.pnpManifest); result.status.isError() {
+			if r.debugLogs != nil {
+				r.debugLogs.addNote("The Yarn PnP path resolution algorithm returned an error")
+			}
+
+			// Try to provide more information about this error if it's available
+			switch result.status {
+			case pnpErrorDependencyNotFound:
+				r.debugMeta.notes = []logger.MsgData{r.pnpManifest.tracker.MsgData(result.errorRange,
+					fmt.Sprintf("The Yarn Plug'n'Play manifest forbids importing %q here because it's not listed as a dependency of this package:", result.errorIdent))}
+
+			case pnpErrorUnfulfilledPeerDependency:
+				r.debugMeta.notes = []logger.MsgData{r.pnpManifest.tracker.MsgData(result.errorRange,
+					fmt.Sprintf("The Yarn Plug'n'Play manifest says this package has a peer dependency on %q, but the package %q has not been installed:", result.errorIdent, result.errorIdent))}
+			}
+
+			return PathPair{}, false, nil
+		} else if result.status == pnpSuccess {
+			absPath := r.fs.Join(result.pkgDirPath, result.pkgSubpath)
+
+			// If Yarn PnP path resolution succeeded, run a custom abbreviated
+			// version of node's module resolution algorithm. The Yarn PnP
+			// specification says to use node's module resolution algorithm verbatim
+			// but that isn't what Yarn actually does. See this for more info:
+			// https://github.com/evanw/esbuild/issues/2473#issuecomment-1216774461
+			if pkgDirInfo := r.dirInfoCached(result.pkgDirPath); pkgDirInfo != nil {
+				// Check the "exports" map
+				if packageJSON := pkgDirInfo.packageJSON; packageJSON != nil && packageJSON.exportsMap != nil {
+					return r.esmResolveAlgorithm(result.pkgIdent, "."+result.pkgSubpath, packageJSON, pkgDirInfo.absPath, absPath)
+				}
+
+				// Check the "browser" map
+				if remapped, ok := r.checkBrowserMap(pkgDirInfo, absPath, absolutePathKind); ok {
+					if remapped == nil {
+						return PathPair{Primary: logger.Path{Text: absPath, Namespace: "file", Flags: logger.PathDisabled}}, true, nil
+					}
+					if remappedResult, ok, diffCase := r.resolveWithoutRemapping(pkgDirInfo.enclosingBrowserScope, *remapped); ok {
+						return remappedResult, true, diffCase
+					}
+				}
+
+				if absolute, ok, diffCase := r.loadAsFileOrDirectory(absPath); ok {
+					return absolute, true, diffCase
+				}
+			}
+
+			if r.debugLogs != nil {
+				r.debugLogs.addNote(fmt.Sprintf("Failed to resolve %q to a file", absPath))
+			}
+			return PathPair{}, false, nil
+		}
+	}
+
 	// Try to parse the package name using node's ESM-specific rules
 	esmPackageName, esmPackageSubpath, esmOK := esmParsePackageName(importPath)
 	if r.debugLogs != nil && esmOK {
@@ -1868,39 +2152,50 @@ func (r resolverQuery) loadNodeModules(importPath string, dirInfo *dirInfo, forb
 		}
 	}
 
+	// Common package resolution logic shared between "node_modules" and "NODE_PATHS"
+	tryToResolvePackage := func(absDir string) (PathPair, bool, *fs.DifferentCase, bool) {
+		absPath := r.fs.Join(absDir, importPath)
+		if r.debugLogs != nil {
+			r.debugLogs.addNote(fmt.Sprintf("Checking for a package in the directory %q", absPath))
+		}
+
+		// Try node's new package resolution rules
+		if esmOK {
+			absPkgPath := r.fs.Join(absDir, esmPackageName)
+			if pkgDirInfo := r.dirInfoCached(absPkgPath); pkgDirInfo != nil {
+				// Check the "exports" map
+				if packageJSON := pkgDirInfo.packageJSON; packageJSON != nil && packageJSON.exportsMap != nil {
+					absolute, ok, diffCase := r.esmResolveAlgorithm(esmPackageName, esmPackageSubpath, packageJSON, absPkgPath, absPath)
+					return absolute, ok, diffCase, true
+				}
+
+				// Check the "browser" map
+				if remapped, ok := r.checkBrowserMap(pkgDirInfo, absPath, absolutePathKind); ok {
+					if remapped == nil {
+						return PathPair{Primary: logger.Path{Text: absPath, Namespace: "file", Flags: logger.PathDisabled}}, true, nil, true
+					}
+					if remappedResult, ok, diffCase := r.resolveWithoutRemapping(pkgDirInfo.enclosingBrowserScope, *remapped); ok {
+						return remappedResult, true, diffCase, true
+					}
+				}
+			}
+		}
+
+		// Try node's old package resolution rules
+		if absolute, ok, diffCase := r.loadAsFileOrDirectory(absPath); ok {
+			return absolute, true, diffCase, true
+		}
+
+		return PathPair{}, false, nil, false
+	}
+
 	// Then check for the package in any enclosing "node_modules" directories
 	for {
 		// Skip directories that are themselves called "node_modules", since we
 		// don't ever want to search for "node_modules/node_modules"
 		if dirInfo.hasNodeModules {
-			absPath := r.fs.Join(dirInfo.absPath, "node_modules", importPath)
-			if r.debugLogs != nil {
-				r.debugLogs.addNote(fmt.Sprintf("Checking for a package in the directory %q", absPath))
-			}
-
-			// Check the package's package.json file
-			if esmOK {
-				absPkgPath := r.fs.Join(dirInfo.absPath, "node_modules", esmPackageName)
-				if pkgDirInfo := r.dirInfoCached(absPkgPath); pkgDirInfo != nil {
-					// Check the "exports" map
-					if packageJSON := pkgDirInfo.packageJSON; packageJSON != nil && packageJSON.exportsMap != nil {
-						return r.esmResolveAlgorithm(esmPackageName, esmPackageSubpath, packageJSON, absPkgPath, absPath)
-					}
-
-					// Check the "browser" map
-					if remapped, ok := r.checkBrowserMap(pkgDirInfo, absPath, absolutePathKind); ok {
-						if remapped == nil {
-							return PathPair{Primary: logger.Path{Text: absPath, Namespace: "file", Flags: logger.PathDisabled}}, true, nil
-						}
-						if remappedResult, ok, diffCase := r.resolveWithoutRemapping(pkgDirInfo.enclosingBrowserScope, *remapped); ok {
-							return remappedResult, true, diffCase
-						}
-					}
-				}
-			}
-
-			if absolute, ok, diffCase := r.loadAsFileOrDirectory(absPath); ok {
-				return absolute, true, diffCase
+			if absolute, ok, diffCase, shouldStop := tryToResolvePackage(r.fs.Join(dirInfo.absPath, "node_modules")); shouldStop {
+				return absolute, ok, diffCase
 			}
 		}
 
@@ -1911,17 +2206,12 @@ func (r resolverQuery) loadNodeModules(importPath string, dirInfo *dirInfo, forb
 		}
 	}
 
-	// Then check the global "NODE_PATH" environment variable.
-	//
-	// Note: This is a deviation from node's published module resolution
-	// algorithm. The published algorithm says "NODE_PATH" must take precedence
-	// over "node_modules" paths, but it appears that the published algorithm is
-	// incorrect. We follow node's actual behavior instead of following the
-	// published algorithm. See also: https://github.com/nodejs/node/issues/38128.
+	// Then check the global "NODE_PATH" environment variable. It has been
+	// clarified that this step comes last after searching for "node_modules"
+	// directories: https://github.com/nodejs/node/issues/38128.
 	for _, absDir := range r.options.AbsNodePaths {
-		absPath := r.fs.Join(absDir, importPath)
-		if absolute, ok, diffCase := r.loadAsFileOrDirectory(absPath); ok {
-			return absolute, true, diffCase
+		if absolute, ok, diffCase, shouldStop := tryToResolvePackage(absDir); shouldStop {
+			return absolute, ok, diffCase
 		}
 	}
 
@@ -1944,24 +2234,66 @@ func (r resolverQuery) finalizeImportsExportsResult(
 	esmPackageSubpath string,
 	absImportPath string,
 ) (PathPair, bool, *fs.DifferentCase) {
-	if (status == pjStatusExact || status == pjStatusInexact) && strings.HasPrefix(resolvedPath, "/") {
-		absResolvedPath := r.fs.Join(absDirPath, resolvedPath[1:])
+	missingSuffix := ""
+
+	if (status == pjStatusExact || status == pjStatusExactEndsWithStar || status == pjStatusInexact) && strings.HasPrefix(resolvedPath, "/") {
+		absResolvedPath := r.fs.Join(absDirPath, resolvedPath)
 
 		switch status {
-		case pjStatusExact:
+		case pjStatusExact, pjStatusExactEndsWithStar:
 			if r.debugLogs != nil {
 				r.debugLogs.addNote(fmt.Sprintf("The resolved path %q is exact", absResolvedPath))
 			}
+
 			resolvedDirInfo := r.dirInfoCached(r.fs.Dir(absResolvedPath))
+			base := r.fs.Base(absResolvedPath)
+			extensionOrder := r.options.ExtensionOrder
+			if r.kind == ast.ImportAt || r.kind == ast.ImportAtConditional {
+				extensionOrder = r.atImportExtensionOrder
+			}
+
 			if resolvedDirInfo == nil {
 				status = pjStatusModuleNotFound
-			} else if entry, diffCase := resolvedDirInfo.entries.Get(r.fs.Base(absResolvedPath)); entry == nil {
+			} else if entry, diffCase := resolvedDirInfo.entries.Get(base); entry == nil {
+				endsWithStar := status == pjStatusExactEndsWithStar
 				status = pjStatusModuleNotFound
+
+				// Try to have a friendly error message if people forget the extension
+				if endsWithStar {
+					for _, ext := range extensionOrder {
+						if entry, _ := resolvedDirInfo.entries.Get(base + ext); entry != nil {
+							if r.debugLogs != nil {
+								r.debugLogs.addNote(fmt.Sprintf("The import %q is missing the extension %q", path.Join(esmPackageName, esmPackageSubpath), ext))
+							}
+							status = pjStatusModuleNotFoundMissingExtension
+							missingSuffix = ext
+							break
+						}
+					}
+				}
 			} else if kind := entry.Kind(r.fs); kind == fs.DirEntry {
 				if r.debugLogs != nil {
 					r.debugLogs.addNote(fmt.Sprintf("The path %q is a directory, which is not allowed", absResolvedPath))
 				}
+				endsWithStar := status == pjStatusExactEndsWithStar
 				status = pjStatusUnsupportedDirectoryImport
+
+				// Try to have a friendly error message if people forget the "/index.js" suffix
+				if endsWithStar {
+					if resolvedDirInfo := r.dirInfoCached(absResolvedPath); resolvedDirInfo != nil {
+						for _, ext := range extensionOrder {
+							base := "index" + ext
+							if entry, _ := resolvedDirInfo.entries.Get(base); entry != nil && entry.Kind(r.fs) == fs.FileEntry {
+								status = pjStatusUnsupportedDirectoryImportMissingIndex
+								missingSuffix = "/" + base
+								if r.debugLogs != nil {
+									r.debugLogs.addNote(fmt.Sprintf("The import %q is missing the suffix %q", path.Join(esmPackageName, esmPackageSubpath), missingSuffix))
+								}
+								break
+							}
+						}
+					}
+				}
 			} else if kind != fs.FileEntry {
 				status = pjStatusModuleNotFound
 			} else {
@@ -1994,14 +2326,14 @@ func (r resolverQuery) finalizeImportsExportsResult(
 	switch status {
 	case pjStatusInvalidModuleSpecifier:
 		r.debugMeta.notes = []logger.MsgData{tracker.MsgData(debug.token,
-			fmt.Sprintf("The module specifier %q is invalid:", resolvedPath))}
+			fmt.Sprintf("The module specifier %q is invalid%s:", resolvedPath, debug.invalidBecause))}
 
 	case pjStatusInvalidPackageConfiguration:
 		r.debugMeta.notes = []logger.MsgData{tracker.MsgData(debug.token,
 			"The package configuration has an invalid value here:")}
 
 	case pjStatusInvalidPackageTarget:
-		why := fmt.Sprintf("The package target %q is invalid:", resolvedPath)
+		why := fmt.Sprintf("The package target %q is invalid%s:", resolvedPath, debug.invalidBecause)
 		if resolvedPath == "" {
 			// "PACKAGE_TARGET_RESOLVE" is specified to throw an "Invalid
 			// Package Target" error for what is actually an invalid package
@@ -2028,9 +2360,9 @@ func (r resolverQuery) finalizeImportsExportsResult(
 
 					// Provide an inline suggestion message with the correct import path
 					actualImportPath := path.Join(esmPackageName, subpath)
-					r.debugMeta.suggestionText = string(js_printer.QuoteForJSON(actualImportPath, false))
+					r.debugMeta.suggestionText = string(helpers.QuoteForJSON(actualImportPath, false))
 					r.debugMeta.suggestionMessage = fmt.Sprintf("Import from %q to get the file %q:",
-						actualImportPath, r.PrettyPath(absolute.Primary))
+						actualImportPath, PrettyPath(r.fs, absolute.Primary))
 				}
 			}
 		}
@@ -2039,13 +2371,34 @@ func (r resolverQuery) finalizeImportsExportsResult(
 		r.debugMeta.notes = []logger.MsgData{tracker.MsgData(debug.token,
 			fmt.Sprintf("The package import %q is not defined in this \"imports\" map:", resolvedPath))}
 
-	case pjStatusModuleNotFound:
+	case pjStatusModuleNotFound, pjStatusModuleNotFoundMissingExtension:
 		r.debugMeta.notes = []logger.MsgData{tracker.MsgData(debug.token,
 			fmt.Sprintf("The module %q was not found on the file system:", resolvedPath))}
 
-	case pjStatusUnsupportedDirectoryImport:
-		r.debugMeta.notes = []logger.MsgData{tracker.MsgData(debug.token,
-			fmt.Sprintf("Importing the directory %q is not supported:", resolvedPath))}
+		// Provide an inline suggestion message with the correct import path
+		if status == pjStatusModuleNotFoundMissingExtension {
+			actualImportPath := path.Join(esmPackageName, esmPackageSubpath+missingSuffix)
+			r.debugMeta.suggestionRange = suggestionRangeEnd
+			r.debugMeta.suggestionText = missingSuffix
+			r.debugMeta.suggestionMessage = fmt.Sprintf("Import from %q to get the file %q:",
+				actualImportPath, PrettyPath(r.fs, logger.Path{Text: r.fs.Join(absDirPath, resolvedPath+missingSuffix), Namespace: "file"}))
+		}
+
+	case pjStatusUnsupportedDirectoryImport, pjStatusUnsupportedDirectoryImportMissingIndex:
+		r.debugMeta.notes = []logger.MsgData{
+			tracker.MsgData(debug.token, fmt.Sprintf("Importing the directory %q is forbidden by this package:", resolvedPath)),
+			tracker.MsgData(packageJSON.source.RangeOfString(packageJSON.exportsMap.propertyKeyLoc),
+				"The presence of \"exports\" here makes importing a directory forbidden:"),
+		}
+
+		// Provide an inline suggestion message with the correct import path
+		if status == pjStatusUnsupportedDirectoryImportMissingIndex {
+			actualImportPath := path.Join(esmPackageName, esmPackageSubpath+missingSuffix)
+			r.debugMeta.suggestionRange = suggestionRangeEnd
+			r.debugMeta.suggestionText = missingSuffix
+			r.debugMeta.suggestionMessage = fmt.Sprintf("Import from %q to get the file %q:",
+				actualImportPath, PrettyPath(r.fs, logger.Path{Text: r.fs.Join(absDirPath, resolvedPath+missingSuffix), Namespace: "file"}))
+		}
 
 	case pjStatusUndefinedNoConditionsMatch:
 		keys := make([]string, 0, len(conditions))
@@ -2118,7 +2471,7 @@ func IsPackagePath(path string) bool {
 
 // This list can be obtained with the following command:
 //
-//   node --experimental-wasi-unstable-preview1 -p "[...require('module').builtinModules].join('\n')"
+//	node --experimental-wasi-unstable-preview1 -p "[...require('module').builtinModules].join('\n')"
 //
 // Be sure to use the *LATEST* version of node when updating this list!
 var BuiltInNodeModules = map[string]bool{

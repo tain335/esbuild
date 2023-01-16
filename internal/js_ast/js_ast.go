@@ -249,11 +249,6 @@ type LocRef struct {
 	Ref Ref
 }
 
-type Comment struct {
-	Text string
-	Loc  logger.Loc
-}
-
 type PropertyKind uint8
 
 const (
@@ -305,15 +300,18 @@ type Property struct {
 
 	TSDecorators []Expr
 
-	Loc   logger.Loc
-	Kind  PropertyKind
-	Flags PropertyFlags
+	Loc             logger.Loc
+	CloseBracketLoc logger.Loc
+	Kind            PropertyKind
+	Flags           PropertyFlags
 }
 
 type PropertyBinding struct {
 	Key               Expr
 	Value             Binding
 	DefaultValueOrNil Expr
+	Loc               logger.Loc
+	CloseBracketLoc   logger.Loc
 	IsComputed        bool
 	IsSpread          bool
 	PreferQuotedKey   bool
@@ -362,6 +360,7 @@ type Class struct {
 type ArrayBinding struct {
 	Binding           Binding
 	DefaultValueOrNil Expr
+	Loc               logger.Loc
 }
 
 type Binding struct {
@@ -383,14 +382,16 @@ type BMissing struct{}
 type BIdentifier struct{ Ref Ref }
 
 type BArray struct {
-	Items        []ArrayBinding
-	HasSpread    bool
-	IsSingleLine bool
+	Items           []ArrayBinding
+	CloseBracketLoc logger.Loc
+	HasSpread       bool
+	IsSingleLine    bool
 }
 
 type BObject struct {
-	Properties   []PropertyBinding
-	IsSingleLine bool
+	Properties    []PropertyBinding
+	CloseBraceLoc logger.Loc
+	IsSingleLine  bool
 }
 
 type Expr struct {
@@ -452,6 +453,39 @@ type EArray struct {
 type EUnary struct {
 	Value Expr
 	Op    OpCode
+
+	// The expression "typeof (0, x)" must not become "typeof x" if "x"
+	// is unbound because that could suppress a ReferenceError from "x".
+	//
+	// Also if we know a typeof operator was originally an identifier, then
+	// we know that this typeof operator always has no side effects (even if
+	// we consider the identifier by itself to have a side effect).
+	//
+	// Note that there *is* actually a case where "typeof x" can throw an error:
+	// when "x" is being referenced inside of its TDZ (temporal dead zone). TDZ
+	// checks are not yet handled correctly by esbuild, so this possibility is
+	// currently ignored.
+	WasOriginallyTypeofIdentifier bool
+
+	// Similarly the expression "delete (0, x)" must not become "delete x"
+	// because that syntax is invalid in strict mode. We also need to make sure
+	// we don't accidentally change the return value:
+	//
+	//   Returns false:
+	//     "var a; delete (a)"
+	//     "var a = Object.freeze({b: 1}); delete (a.b)"
+	//     "var a = Object.freeze({b: 1}); delete (a?.b)"
+	//     "var a = Object.freeze({b: 1}); delete (a['b'])"
+	//     "var a = Object.freeze({b: 1}); delete (a?.['b'])"
+	//
+	//   Returns true:
+	//     "var a; delete (0, a)"
+	//     "var a = Object.freeze({b: 1}); delete (true && a.b)"
+	//     "var a = Object.freeze({b: 1}); delete (false || a?.b)"
+	//     "var a = Object.freeze({b: 1}); delete (null ?? a?.['b'])"
+	//     "var a = Object.freeze({b: 1}); delete (true ? a['b'] : a['b'])"
+	//
+	WasOriginallyDeleteOfIdentifierOrPropertyAccess bool
 }
 
 type EBinary struct {
@@ -491,14 +525,25 @@ var SEmptyShared = &SEmpty{}
 var SDebuggerShared = &SDebugger{}
 
 type ENew struct {
-	Target        Expr
-	Args          []Expr
+	Target Expr
+	Args   []Expr
+
 	CloseParenLoc logger.Loc
+	IsMultiLine   bool
 
 	// True if there is a comment containing "@__PURE__" or "#__PURE__" preceding
 	// this call expression. See the comment inside ECall for more details.
 	CanBeUnwrappedIfUnused bool
 }
+
+type CallKind uint8
+
+const (
+	NormalCall CallKind = iota
+	DirectEval
+	TargetWasOriginallyPropertyAccess
+	InternalPublicFieldCall
+)
 
 type OptionalChain uint8
 
@@ -519,7 +564,8 @@ type ECall struct {
 	Args          []Expr
 	CloseParenLoc logger.Loc
 	OptionalChain OptionalChain
-	IsDirectEval  bool
+	Kind          CallKind
+	IsMultiLine   bool
 
 	// True if there is a comment containing "@__PURE__" or "#__PURE__" preceding
 	// this call expression. This is an annotation used for tree shaking, and
@@ -534,7 +580,7 @@ type ECall struct {
 
 func (a *ECall) HasSameFlagsAs(b *ECall) bool {
 	return a.OptionalChain == b.OptionalChain &&
-		a.IsDirectEval == b.IsDirectEval &&
+		a.Kind == b.Kind &&
 		a.CanBeUnwrappedIfUnused == b.CanBeUnwrappedIfUnused
 }
 
@@ -561,9 +607,10 @@ func (a *EDot) HasSameFlagsAs(b *EDot) bool {
 }
 
 type EIndex struct {
-	Target        Expr
-	Index         Expr
-	OptionalChain OptionalChain
+	Target          Expr
+	Index           Expr
+	CloseBracketLoc logger.Loc
+	OptionalChain   OptionalChain
 
 	// If true, this property access is known to be free of side-effects. That
 	// means it can be removed if the resulting value isn't used.
@@ -657,10 +704,11 @@ type EMangledProp struct {
 }
 
 type EJSXElement struct {
-	TagOrNil   Expr
-	Properties []Property
-	Children   []Expr
-	CloseLoc   logger.Loc
+	TagOrNil        Expr
+	Properties      []Property
+	Children        []Expr
+	CloseLoc        logger.Loc
+	IsTagSingleLine bool
 }
 
 type ENumber struct{ Value float64 }
@@ -699,6 +747,14 @@ type ETemplate struct {
 	Parts          []TemplatePart
 	HeadLoc        logger.Loc
 	LegacyOctalLoc logger.Loc
+
+	// If the tag is present, it is expected to be a function and is called. If
+	// the tag is a syntactic property access, then the value for "this" in the
+	// function call is the object whose property was accessed (e.g. in "a.b``"
+	// the value for "this" in "a.b" is "a"). We need to ensure that if "a``"
+	// ever becomes "b.c``" later on due to optimizations, it is written as
+	// "(0, b.c)``" to avoid a behavior change.
+	TagWasOriginallyPropertyAccess bool
 }
 
 type ERegExp struct{ Value string }
@@ -725,31 +781,23 @@ type EIf struct {
 
 type ERequireString struct {
 	ImportRecordIndex uint32
+	CloseParenLoc     logger.Loc
 }
 
 type ERequireResolveString struct {
 	ImportRecordIndex uint32
+	CloseParenLoc     logger.Loc
 }
 
 type EImportString struct {
-	// Comments inside "import()" expressions have special meaning for Webpack.
-	// Preserving comments inside these expressions makes it possible to use
-	// esbuild as a TypeScript-to-JavaScript frontend for Webpack to improve
-	// performance. We intentionally do not interpret these comments in esbuild
-	// because esbuild is not Webpack. But we do preserve them since doing so is
-	// harmless, easy to maintain, and useful to people. See the Webpack docs for
-	// more info: https://webpack.js.org/api/module-methods/#magic-comments.
-	LeadingInteriorComments []Comment
-
 	ImportRecordIndex uint32
+	CloseParenLoc     logger.Loc
 }
 
 type EImportCall struct {
-	Expr         Expr
-	OptionsOrNil Expr
-
-	// See the comment for this same field on "EImportString" for more information
-	LeadingInteriorComments []Comment
+	Expr          Expr
+	OptionsOrNil  Expr
+	CloseParenLoc logger.Loc
 }
 
 type Stmt struct {
@@ -969,21 +1017,23 @@ type STry struct {
 type Case struct {
 	ValueOrNil Expr // If this is nil, this is "default" instead of "case"
 	Body       []Stmt
+	Loc        logger.Loc
 }
 
 type SSwitch struct {
-	Test    Expr
-	Cases   []Case
-	BodyLoc logger.Loc
+	Test          Expr
+	Cases         []Case
+	BodyLoc       logger.Loc
+	CloseBraceLoc logger.Loc
 }
 
 // This object represents all of these types of import statements:
 //
-//    import 'path'
-//    import {item1, item2} from 'path'
-//    import * as ns from 'path'
-//    import defaultItem, {item1, item2} from 'path'
-//    import defaultItem, * as ns from 'path'
+//	import 'path'
+//	import {item1, item2} from 'path'
+//	import * as ns from 'path'
+//	import defaultItem, {item1, item2} from 'path'
+//	import defaultItem, * as ns from 'path'
 //
 // Many parts are optional and can be combined in different ways. The only
 // restriction is that you cannot have both a clause and a star namespace.
@@ -1488,6 +1538,7 @@ type Scope struct {
 	Parent    *Scope
 	Children  []*Scope
 	Members   map[string]ScopeMember
+	Replaced  []ScopeMember
 	Generated []Ref
 
 	// The location of the "use strict" directive for ExplicitStrictMode
@@ -1522,6 +1573,7 @@ const (
 	ImplicitStrictModeClass
 	ImplicitStrictModeESM
 	ImplicitStrictModeTSAlwaysStrict
+	ImplicitStrictModeJSXAutomaticRuntime
 )
 
 func (s *Scope) RecursiveSetStrictMode(kind StrictModeKind) {
@@ -1538,27 +1590,27 @@ func (s *Scope) RecursiveSetStrictMode(kind StrictModeKind) {
 // block are merged into a single namespace while the non-exported code is
 // still scoped to just within that block:
 //
-//   let x = 1;
-//   namespace Foo {
-//     let x = 2;
-//     export let y = 3;
-//   }
-//   namespace Foo {
-//     console.log(x); // 1
-//     console.log(y); // 3
-//   }
+//	let x = 1;
+//	namespace Foo {
+//	  let x = 2;
+//	  export let y = 3;
+//	}
+//	namespace Foo {
+//	  console.log(x); // 1
+//	  console.log(y); // 3
+//	}
 //
 // Doing this also works inside an enum:
 //
-//   enum Foo {
-//     A = 3,
-//     B = A + 1,
-//   }
-//   enum Foo {
-//     C = A + 2,
-//   }
-//   console.log(Foo.B) // 4
-//   console.log(Foo.C) // 5
+//	enum Foo {
+//	  A = 3,
+//	  B = A + 1,
+//	}
+//	enum Foo {
+//	  C = A + 2,
+//	}
+//	console.log(Foo.B) // 4
+//	console.log(Foo.C) // 5
 //
 // This is a form of identifier lookup that works differently than the
 // hierarchical scope-based identifier lookup in JavaScript. Lookup now needs
@@ -1774,8 +1826,12 @@ type AST struct {
 	ModuleTypeData ModuleTypeData
 	Parts          []Part
 	Symbols        []Symbol
+	ExprComments   map[logger.Loc][]string
 	ModuleScope    *Scope
 	CharFreq       *CharFreq
+
+	// This is internal-only data used for the implementation of Yarn PnP
+	ManifestForYarnPnP Expr
 
 	Hashbang  string
 	Directive string
@@ -2106,8 +2162,8 @@ type SymbolUse struct {
 }
 
 type SymbolCallUse struct {
-	CallCountEstimate          uint32
-	SingleArgCallCountEstimate uint32
+	CallCountEstimate                   uint32
+	SingleArgNonSpreadCallCountEstimate uint32
 }
 
 // Returns the canonical ref that represents the ref for the provided symbol.

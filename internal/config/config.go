@@ -13,10 +13,40 @@ import (
 )
 
 type JSXOptions struct {
-	Factory  DefineExpr
-	Fragment DefineExpr
-	Parse    bool
-	Preserve bool
+	Factory          DefineExpr
+	Fragment         DefineExpr
+	Parse            bool
+	Preserve         bool
+	AutomaticRuntime bool
+	ImportSource     string
+	Development      bool
+	SideEffects      bool
+}
+
+type TSJSX uint8
+
+const (
+	TSJSXNone TSJSX = iota
+	TSJSXPreserve
+	TSJSXReact
+	TSJSXReactJSX
+	TSJSXReactJSXDev
+)
+
+func (jsxOptions *JSXOptions) SetOptionsFromTSJSX(tsx TSJSX) {
+	switch tsx {
+	case TSJSXPreserve:
+		jsxOptions.Preserve = true
+	case TSJSXReact:
+		jsxOptions.AutomaticRuntime = false
+		jsxOptions.Development = false
+	case TSJSXReactJSX:
+		jsxOptions.AutomaticRuntime = true
+		// Don't set Development = false implicitly
+	case TSJSXReactJSXDev:
+		jsxOptions.AutomaticRuntime = true
+		jsxOptions.Development = true
+	}
 }
 
 type TSOptions struct {
@@ -66,6 +96,7 @@ const (
 	LoaderCSS
 	LoaderDataURL
 	LoaderDefault
+	LoaderEmpty
 	LoaderFile
 	LoaderJS
 	LoaderJSON
@@ -75,6 +106,25 @@ const (
 	LoaderTSNoAmbiguousLessThan // Used with ".mts" and ".cts"
 	LoaderTSX
 )
+
+var LoaderToString = []string{
+	"none",
+	"base64",
+	"binary",
+	"copy",
+	"css",
+	"dataurl",
+	"default",
+	"empty",
+	"file",
+	"js",
+	"json",
+	"jsx",
+	"text",
+	"ts",
+	"ts",
+	"tsx",
+}
 
 func (loader Loader) IsTypeScript() bool {
 	switch loader {
@@ -87,7 +137,7 @@ func (loader Loader) IsTypeScript() bool {
 
 func (loader Loader) CanHaveSourceMap() bool {
 	switch loader {
-	case LoaderJS, LoaderJSX, LoaderTS, LoaderTSNoAmbiguousLessThan, LoaderTSX, LoaderCSS:
+	case LoaderJS, LoaderJSX, LoaderTS, LoaderTSNoAmbiguousLessThan, LoaderTSX, LoaderCSS, LoaderJSON:
 		return true
 	default:
 		return false
@@ -223,6 +273,8 @@ type Options struct {
 	Conditions       []string
 	AbsNodePaths     []string // The "NODE_PATH" variable from Node.js
 	ExternalSettings ExternalSettings
+	ExternalPackages bool
+	PackageAliases   map[string]string
 
 	AbsOutputFile      string
 	AbsOutputDir       string
@@ -234,7 +286,7 @@ type Options struct {
 	ExtensionToLoader  map[string]Loader
 
 	PublicPath      string
-	InjectAbsPaths  []string
+	InjectPaths     []string
 	InjectedDefines []InjectedDefine
 	InjectedFiles   []InjectedFile
 
@@ -276,6 +328,7 @@ type Options struct {
 	WriteToStdout bool
 
 	OmitRuntimeForTests     bool
+	OmitJSXRuntimeForTests  bool
 	UnusedImportFlagsTS     UnusedImportFlagsTS
 	UseDefineForClassFields MaybeBool
 	ASCIIOnly               bool
@@ -309,32 +362,31 @@ type UnusedImportFlagsTS uint8
 
 // With !UnusedImportKeepStmt && !UnusedImportKeepValues:
 //
-//   "import 'foo'"                      => "import 'foo'"
-//   "import * as unused from 'foo'"     => ""
-//   "import { unused } from 'foo'"      => ""
-//   "import { type unused } from 'foo'" => ""
+//	"import 'foo'"                      => "import 'foo'"
+//	"import * as unused from 'foo'"     => ""
+//	"import { unused } from 'foo'"      => ""
+//	"import { type unused } from 'foo'" => ""
 //
 // With UnusedImportKeepStmt && !UnusedImportKeepValues:
 //
-//   "import 'foo'"                      => "import 'foo'"
-//   "import * as unused from 'foo'"     => "import 'foo'"
-//   "import { unused } from 'foo'"      => "import 'foo'"
-//   "import { type unused } from 'foo'" => "import 'foo'"
+//	"import 'foo'"                      => "import 'foo'"
+//	"import * as unused from 'foo'"     => "import 'foo'"
+//	"import { unused } from 'foo'"      => "import 'foo'"
+//	"import { type unused } from 'foo'" => "import 'foo'"
 //
 // With !UnusedImportKeepStmt && UnusedImportKeepValues:
 //
-//   "import 'foo'"                      => "import 'foo'"
-//   "import * as unused from 'foo'"     => "import * as unused from 'foo'"
-//   "import { unused } from 'foo'"      => "import { unused } from 'foo'"
-//   "import { type unused } from 'foo'" => ""
+//	"import 'foo'"                      => "import 'foo'"
+//	"import * as unused from 'foo'"     => "import * as unused from 'foo'"
+//	"import { unused } from 'foo'"      => "import { unused } from 'foo'"
+//	"import { type unused } from 'foo'" => ""
 //
 // With UnusedImportKeepStmt && UnusedImportKeepValues:
 //
-//   "import 'foo'"                      => "import 'foo'"
-//   "import * as unused from 'foo'"     => "import * as unused from 'foo'"
-//   "import { unused } from 'foo'"      => "import { unused } from 'foo'"
-//   "import { type unused } from 'foo'" => "import {} from 'foo'"
-//
+//	"import 'foo'"                      => "import 'foo'"
+//	"import * as unused from 'foo'"     => "import * as unused from 'foo'"
+//	"import { unused } from 'foo'"      => "import { unused } from 'foo'"
+//	"import { type unused } from 'foo'" => "import {} from 'foo'"
 const (
 	UnusedImportKeepStmt   UnusedImportFlagsTS = 1 << iota // "importsNotUsedAsValues" != "remove"
 	UnusedImportKeepValues                                 // "preserveValueImports" == true

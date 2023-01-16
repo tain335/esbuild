@@ -1,4 +1,4 @@
-import * as types from "../shared/types"
+import type * as types from "../shared/types"
 import * as common from "../shared/common"
 import * as ourselves from "./browser"
 
@@ -8,14 +8,13 @@ declare let WEB_WORKER_FUNCTION: (postMessage: (data: Uint8Array) => void) => (e
 
 export let version = ESBUILD_VERSION;
 
-export let build: typeof types.build = (options: types.BuildOptions): Promise<any> =>
+export let build: typeof types.build = (options: types.BuildOptions) =>
   ensureServiceIsRunning().build(options);
 
-export const serve: typeof types.serve = () => {
-  throw new Error(`The "serve" API only works in node`);
-};
+export let context: typeof types.context = (options: types.BuildOptions) =>
+  ensureServiceIsRunning().context(options);
 
-export const transform: typeof types.transform = (input, options) =>
+export const transform: typeof types.transform = (input: string | Uint8Array, options?: types.TransformOptions) =>
   ensureServiceIsRunning().transform(input, options);
 
 export const formatMessages: typeof types.formatMessages = (messages, options) =>
@@ -42,6 +41,7 @@ export const analyzeMetafileSync: typeof types.analyzeMetafileSync = () => {
 
 interface Service {
   build: typeof types.build;
+  context: typeof types.context;
   transform: typeof types.transform;
   formatMessages: typeof types.formatMessages;
   analyzeMetafile: typeof types.analyzeMetafile;
@@ -71,16 +71,7 @@ export const initialize: typeof types.initialize = options => {
   return initializePromise;
 }
 
-const startRunningService = async (wasmURL: string, wasmModule: WebAssembly.Module | undefined, useWorker: boolean): Promise<void> => {
-  let wasm: ArrayBuffer | WebAssembly.Module;
-  if (wasmModule) {
-    wasm = wasmModule;
-  } else {
-    let res = await fetch(wasmURL);
-    if (!res.ok) throw new Error(`Failed to download ${JSON.stringify(wasmURL)}`);
-    wasm = await res.arrayBuffer();
-  }
-
+const startRunningService = async (wasmURL: string | URL, wasmModule: WebAssembly.Module | undefined, useWorker: boolean): Promise<void> => {
   let worker: {
     onmessage: ((event: any) => void) | null
     postMessage: (data: Uint8Array | ArrayBuffer | WebAssembly.Module) => void
@@ -102,32 +93,59 @@ const startRunningService = async (wasmURL: string, wasmModule: WebAssembly.Modu
     }
   }
 
-  worker.postMessage(wasm)
-  worker.onmessage = ({ data }) => readFromStdout(data)
+  let firstMessageResolve: (value: void) => void
+  let firstMessageReject: (error: any) => void
+
+  const firstMessagePromise = new Promise((resolve, reject) => {
+    firstMessageResolve = resolve
+    firstMessageReject = reject
+  })
+
+  worker.onmessage = ({ data: error }) => {
+    worker.onmessage = ({ data }) => readFromStdout(data)
+    if (error) firstMessageReject(error)
+    else firstMessageResolve()
+  }
+
+  worker.postMessage(wasmModule || new URL(wasmURL, location.href).toString())
 
   let { readFromStdout, service } = common.createChannel({
     writeToStdin(bytes) {
       worker.postMessage(bytes)
     },
     isSync: false,
-    isWriteUnavailable: true,
+    hasFS: false,
     esbuild: ourselves,
   })
 
+  // This will throw if WebAssembly module instantiation fails
+  await firstMessagePromise
+
   longLivedService = {
-    build: (options: types.BuildOptions): Promise<any> =>
+    build: (options: types.BuildOptions) =>
       new Promise<types.BuildResult>((resolve, reject) =>
-        service.buildOrServe({
+        service.buildOrContext({
           callName: 'build',
           refs: null,
-          serveOptions: null,
           options,
           isTTY: false,
           defaultWD: '/',
           callback: (err, res) => err ? reject(err) : resolve(res as types.BuildResult),
         })),
-    transform: (input, options) =>
-      new Promise((resolve, reject) =>
+
+    context: (options: types.BuildOptions) =>
+      new Promise<types.BuildContext>((resolve, reject) =>
+        service.buildOrContext({
+          callName: 'context',
+          refs: null,
+          options,
+          isTTY: false,
+          defaultWD: '/',
+          callback: (err, res) => err ? reject(err) : resolve(res as types.BuildContext),
+        })),
+
+    transform: (input: string | Uint8Array, options?: types.TransformOptions) =>
+      new Promise<types.TransformResult>((resolve, reject) =>
         service.transform({
           callName: 'transform',
           refs: null,
@@ -140,6 +158,7 @@ const startRunningService = async (wasmURL: string, wasmModule: WebAssembly.Modu
           },
           callback: (err, res) => err ? reject(err) : resolve(res!),
         })),
+
     formatMessages: (messages, options) =>
       new Promise((resolve, reject) =>
         service.formatMessages({
@@ -149,6 +168,7 @@ const startRunningService = async (wasmURL: string, wasmModule: WebAssembly.Modu
           options,
           callback: (err, res) => err ? reject(err) : resolve(res!),
         })),
+
     analyzeMetafile: (metafile, options) =>
       new Promise((resolve, reject) =>
         service.analyzeMetafile({

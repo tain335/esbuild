@@ -1,7 +1,11 @@
 package cli
 
+// This file implements the public CLI. It's deliberately implemented using
+// esbuild's public "Build", "Transform", and "AnalyzeMetafile" APIs instead of
+// using internal APIs so that any tests that cover the CLI also implicitly
+// cover the public API as well.
+
 import (
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -46,6 +50,7 @@ const (
 )
 
 type parseOptionsExtras struct {
+	watch       bool
 	metafile    *string
 	mangleCache *string
 }
@@ -118,10 +123,8 @@ func parseOptionsImpl(
 		case isBoolFlag(arg, "--watch") && buildOpts != nil:
 			if value, err := parseBoolFlag(arg, true); err != nil {
 				return parseOptionsExtras{}, err
-			} else if value {
-				buildOpts.Watch = &api.WatchMode{}
 			} else {
-				buildOpts.Watch = nil
+				extras.watch = value
 			}
 
 		case isBoolFlag(arg, "--minify"):
@@ -547,54 +550,67 @@ func parseOptionsImpl(
 						"to specify the file type that the output extension applies to .",
 				)
 			}
-			if buildOpts.OutExtensions == nil {
-				buildOpts.OutExtensions = make(map[string]string)
+			if buildOpts.OutExtension == nil {
+				buildOpts.OutExtension = make(map[string]string)
 			}
-			buildOpts.OutExtensions[value[:equals]] = value[equals+1:]
+			buildOpts.OutExtension[value[:equals]] = value[equals+1:]
 
-		case strings.HasPrefix(arg, "--platform=") && buildOpts != nil:
+		case strings.HasPrefix(arg, "--platform="):
 			value := arg[len("--platform="):]
+			var platform api.Platform
 			switch value {
 			case "browser":
-				buildOpts.Platform = api.PlatformBrowser
+				platform = api.PlatformBrowser
 			case "node":
-				buildOpts.Platform = api.PlatformNode
+				platform = api.PlatformNode
 			case "neutral":
-				buildOpts.Platform = api.PlatformNeutral
+				platform = api.PlatformNeutral
 			default:
 				return parseOptionsExtras{}, cli_helpers.MakeErrorWithNote(
 					fmt.Sprintf("Invalid value %q in %q", value, arg),
 					"Valid values are \"browser\", \"node\", or \"neutral\".",
 				)
 			}
+			if buildOpts != nil {
+				buildOpts.Platform = platform
+			} else {
+				transformOpts.Platform = platform
+			}
 
 		case strings.HasPrefix(arg, "--format="):
 			value := arg[len("--format="):]
+			var format api.Format
 			switch value {
 			case "iife":
-				if buildOpts != nil {
-					buildOpts.Format = api.FormatIIFE
-				} else {
-					transformOpts.Format = api.FormatIIFE
-				}
+				format = api.FormatIIFE
 			case "cjs":
-				if buildOpts != nil {
-					buildOpts.Format = api.FormatCommonJS
-				} else {
-					transformOpts.Format = api.FormatCommonJS
-				}
+				format = api.FormatCommonJS
 			case "esm":
-				if buildOpts != nil {
-					buildOpts.Format = api.FormatESModule
-				} else {
-					transformOpts.Format = api.FormatESModule
-				}
+				format = api.FormatESModule
 			default:
 				return parseOptionsExtras{}, cli_helpers.MakeErrorWithNote(
 					fmt.Sprintf("Invalid value %q in %q", value, arg),
 					"Valid values are \"iife\", \"cjs\", or \"esm\".",
 				)
 			}
+			if buildOpts != nil {
+				buildOpts.Format = format
+			} else {
+				transformOpts.Format = format
+			}
+
+		case strings.HasPrefix(arg, "--packages=") && buildOpts != nil:
+			value := arg[len("--packages="):]
+			var packages api.Packages
+			if value == "external" {
+				packages = api.PackagesExternal
+			} else {
+				return parseOptionsExtras{}, cli_helpers.MakeErrorWithNote(
+					fmt.Sprintf("Invalid value %q in %q", value, arg),
+					"The only valid value is \"external\".",
+				)
+			}
+			buildOpts.Packages = packages
 
 		case strings.HasPrefix(arg, "--external:") && buildOpts != nil:
 			buildOpts.External = append(buildOpts.External, arg[len("--external:"):])
@@ -602,24 +618,41 @@ func parseOptionsImpl(
 		case strings.HasPrefix(arg, "--inject:") && buildOpts != nil:
 			buildOpts.Inject = append(buildOpts.Inject, arg[len("--inject:"):])
 
+		case strings.HasPrefix(arg, "--alias:") && buildOpts != nil:
+			value := arg[len("--alias:"):]
+			equals := strings.IndexByte(value, '=')
+			if equals == -1 {
+				return parseOptionsExtras{}, cli_helpers.MakeErrorWithNote(
+					fmt.Sprintf("Missing \"=\" in %q", arg),
+					"You need to use \"=\" to specify both the original package name and the replacement package name. "+
+						"For example, \"--alias:old=new\" replaces package \"old\" with package \"new\".",
+				)
+			}
+			if buildOpts.Alias == nil {
+				buildOpts.Alias = make(map[string]string)
+			}
+			buildOpts.Alias[value[:equals]] = value[equals+1:]
+
 		case strings.HasPrefix(arg, "--jsx="):
 			value := arg[len("--jsx="):]
-			var mode api.JSXMode
+			var mode api.JSX
 			switch value {
 			case "transform":
-				mode = api.JSXModeTransform
+				mode = api.JSXTransform
 			case "preserve":
-				mode = api.JSXModePreserve
+				mode = api.JSXPreserve
+			case "automatic":
+				mode = api.JSXAutomatic
 			default:
 				return parseOptionsExtras{}, cli_helpers.MakeErrorWithNote(
 					fmt.Sprintf("Invalid value %q in %q", value, arg),
-					"Valid values are \"transform\" or \"preserve\".",
+					"Valid values are \"transform\", \"automatic\", or \"preserve\".",
 				)
 			}
 			if buildOpts != nil {
-				buildOpts.JSXMode = mode
+				buildOpts.JSX = mode
 			} else {
-				transformOpts.JSXMode = mode
+				transformOpts.JSX = mode
 			}
 
 		case strings.HasPrefix(arg, "--jsx-factory="):
@@ -636,6 +669,32 @@ func parseOptionsImpl(
 				buildOpts.JSXFragment = value
 			} else {
 				transformOpts.JSXFragment = value
+			}
+
+		case strings.HasPrefix(arg, "--jsx-import-source="):
+			value := arg[len("--jsx-import-source="):]
+			if buildOpts != nil {
+				buildOpts.JSXImportSource = value
+			} else {
+				transformOpts.JSXImportSource = value
+			}
+
+		case isBoolFlag(arg, "--jsx-dev"):
+			if value, err := parseBoolFlag(arg, true); err != nil {
+				return parseOptionsExtras{}, err
+			} else if buildOpts != nil {
+				buildOpts.JSXDev = value
+			} else {
+				transformOpts.JSXDev = value
+			}
+
+		case isBoolFlag(arg, "--jsx-side-effects"):
+			if value, err := parseBoolFlag(arg, true); err != nil {
+				return parseOptionsExtras{}, err
+			} else if buildOpts != nil {
+				buildOpts.JSXSideEffects = value
+			} else {
+				transformOpts.JSXSideEffects = value
 			}
 
 		case strings.HasPrefix(arg, "--banner=") && transformOpts != nil:
@@ -734,6 +793,8 @@ func parseOptionsImpl(
 				"allow-overwrite":    true,
 				"bundle":             true,
 				"ignore-annotations": true,
+				"jsx-dev":            true,
+				"jsx-side-effects":   true,
 				"keep-names":         true,
 				"minify-identifiers": true,
 				"minify-syntax":      true,
@@ -750,6 +811,7 @@ func parseOptionsImpl(
 				"asset-names":        true,
 				"banner":             true,
 				"bundle":             true,
+				"certfile":           true,
 				"charset":            true,
 				"chunk-names":        true,
 				"color":              true,
@@ -761,8 +823,10 @@ func parseOptionsImpl(
 				"ignore-annotations": true,
 				"jsx-factory":        true,
 				"jsx-fragment":       true,
+				"jsx-import-source":  true,
 				"jsx":                true,
 				"keep-names":         true,
+				"keyfile":            true,
 				"legal-comments":     true,
 				"loader":             true,
 				"log-level":          true,
@@ -779,11 +843,14 @@ func parseOptionsImpl(
 				"outbase":            true,
 				"outdir":             true,
 				"outfile":            true,
+				"packages":           true,
 				"platform":           true,
 				"preserve-symlinks":  true,
 				"public-path":        true,
 				"reserve-props":      true,
 				"resolve-extensions": true,
+				"serve":              true,
+				"servedir":           true,
 				"source-root":        true,
 				"sourcefile":         true,
 				"sourcemap":          true,
@@ -797,6 +864,7 @@ func parseOptionsImpl(
 			}
 
 			colon := map[string]bool{
+				"alias":         true,
 				"banner":        true,
 				"define":        true,
 				"drop":          true,
@@ -989,11 +1057,8 @@ func runImpl(osArgs []string) int {
 	for _, arg := range osArgs {
 		// Special-case running a server
 		if arg == "--serve" || strings.HasPrefix(arg, "--serve=") || strings.HasPrefix(arg, "--servedir=") {
-			if err := serveImpl(osArgs); err != nil {
-				logger.PrintErrorToStderr(osArgs, err.Error())
-				return 1
-			}
-			return 0
+			serveImpl(osArgs)
+			return 1 // There was an error starting the server if we get here
 		}
 
 		// Special-case analyze just for our CLI
@@ -1017,20 +1082,16 @@ func runImpl(osArgs []string) int {
 
 	switch {
 	case buildOptions != nil:
-		for _, key := range os.Environ() {
-			// Read the "NODE_PATH" from the environment. This is part of node's
-			// module resolution algorithm. Documentation for this can be found here:
-			// https://nodejs.org/api/modules.html#modules_loading_from_the_global_folders
-			if strings.HasPrefix(key, "NODE_PATH=") {
-				value := key[len("NODE_PATH="):]
-				separator := ":"
-				if fs.CheckIfWindows() {
-					// On Windows, NODE_PATH is delimited by semicolons instead of colons
-					separator = ";"
-				}
-				buildOptions.NodePaths = splitWithEmptyCheck(value, separator)
-				break
+		// Read the "NODE_PATH" from the environment. This is part of node's
+		// module resolution algorithm. Documentation for this can be found here:
+		// https://nodejs.org/api/modules.html#modules_loading_from_the_global_folders
+		if value, ok := os.LookupEnv("NODE_PATH"); ok {
+			separator := ":"
+			if fs.CheckIfWindows() {
+				// On Windows, NODE_PATH is delimited by semicolons instead of colons
+				separator = ";"
 			}
+			buildOptions.NodePaths = splitWithEmptyCheck(value, separator)
 		}
 
 		// Read from stdin when there are no entry points
@@ -1150,50 +1211,72 @@ func runImpl(osArgs []string) int {
 					}
 				}
 			}
-
-			// Write out the metafile whenever we rebuild
-			if buildOptions.Watch != nil {
-				buildOptions.Watch.OnRebuild = func(result api.BuildResult) {
-					writeMetafile(result.Metafile)
-				}
-			}
 		}
 
-		// Always generate a metafile if we're analyzing, even if it won't be written out
+		// Print metafile analysis after the build if it's enabled
+		var printAnalysis func(metafile string)
 		if analyze {
+			printAnalysis = func(metafile string) {
+				if metafile == "" {
+					return
+				}
+				logger.PrintTextWithColor(os.Stderr, logger.OutputOptionsForArgs(osArgs).Color, func(colors logger.Colors) string {
+					return api.AnalyzeMetafile(metafile, api.AnalyzeMetafileOptions{
+						Color:   colors != logger.Colors{},
+						Verbose: analyzeVerbose,
+					})
+				})
+				os.Stderr.WriteString("\n")
+			}
+
+			// Always generate a metafile if we're analyzing, even if it won't be written out
 			buildOptions.Metafile = true
 		}
 
-		// Run the build
+		// Handle post-build actions with a plugin so they also work in watch mode
+		buildOptions.Plugins = append(buildOptions.Plugins, api.Plugin{
+			Name: "PostBuildActions",
+			Setup: func(build api.PluginBuild) {
+				build.OnEnd(func(result *api.BuildResult) (api.OnEndResult, error) {
+					// Print our analysis of the metafile
+					if printAnalysis != nil {
+						printAnalysis(result.Metafile)
+					}
+
+					// Write the metafile to the file system
+					if writeMetafile != nil {
+						writeMetafile(result.Metafile)
+					}
+
+					// Write the mangle cache to the file system
+					if writeMangleCache != nil {
+						writeMangleCache(result.MangleCache)
+					}
+
+					return api.OnEndResult{}, nil
+				})
+			},
+		})
+
+		// Handle watch mode
+		if extras.watch {
+			ctx, err := api.Context(*buildOptions)
+
+			// Only start watching if the build options passed validation
+			if err != nil {
+				return 1
+			}
+
+			ctx.Watch(api.WatchOptions{})
+
+			// Do not exit if we're in watch mode
+			<-make(chan struct{})
+		}
+
+		// This prints the summary which the context API doesn't do
 		result := api.Build(*buildOptions)
 
-		// Print the analysis after the build
-		if analyze {
-			logger.PrintTextWithColor(os.Stderr, logger.OutputOptionsForArgs(osArgs).Color, func(colors logger.Colors) string {
-				return api.AnalyzeMetafile(result.Metafile, api.AnalyzeMetafileOptions{
-					Color:   colors != logger.Colors{},
-					Verbose: analyzeVerbose,
-				})
-			})
-			os.Stderr.WriteString("\n")
-		}
-
-		// Write the metafile to the file system
-		if writeMetafile != nil {
-			writeMetafile(result.Metafile)
-		}
-
-		// Write the mangle cache to the file system
-		if writeMangleCache != nil {
-			writeMangleCache(result.MangleCache)
-		}
-
-		// Do not exit if we're in watch mode
-		if buildOptions.Watch != nil {
-			<-make(chan bool)
-		}
-
-		// Stop if there were errors
+		// Return a non-zero exit code if there were errors
 		if len(result.Errors) > 0 {
 			return 1
 		}
@@ -1217,14 +1300,7 @@ func runImpl(osArgs []string) int {
 		os.Stdout.Write(result.Code)
 
 	case err != nil:
-		msg := logger.Msg{
-			Kind: logger.Error,
-			Data: logger.MsgData{Text: err.Text},
-		}
-		if err.Note != "" {
-			msg.Notes = []logger.MsgData{{Text: err.Note}}
-		}
-		logger.PrintMessageToStderr(osArgs, msg)
+		logger.PrintErrorWithNoteToStderr(osArgs, err.Text, err.Note)
 		return 1
 	}
 
@@ -1235,6 +1311,8 @@ func parseServeOptionsImpl(osArgs []string) (api.ServeOptions, []string, error) 
 	host := ""
 	portText := "0"
 	servedir := ""
+	keyfile := ""
+	certfile := ""
 
 	// Filter out server-specific flags
 	filteredArgs := make([]string, 0, len(osArgs))
@@ -1245,6 +1323,10 @@ func parseServeOptionsImpl(osArgs []string) (api.ServeOptions, []string, error) 
 			portText = arg[len("--serve="):]
 		} else if strings.HasPrefix(arg, "--servedir=") {
 			servedir = arg[len("--servedir="):]
+		} else if strings.HasPrefix(arg, "--keyfile=") {
+			keyfile = arg[len("--keyfile="):]
+		} else if strings.HasPrefix(arg, "--certfile=") {
+			certfile = arg[len("--certfile="):]
 		} else {
 			filteredArgs = append(filteredArgs, arg)
 		}
@@ -1272,13 +1354,16 @@ func parseServeOptionsImpl(osArgs []string) (api.ServeOptions, []string, error) 
 		Port:     uint16(port),
 		Host:     host,
 		Servedir: servedir,
+		Keyfile:  keyfile,
+		Certfile: certfile,
 	}, filteredArgs, nil
 }
 
-func serveImpl(osArgs []string) error {
+func serveImpl(osArgs []string) {
 	serveOptions, filteredArgs, err := parseServeOptionsImpl(osArgs)
 	if err != nil {
-		return err
+		logger.PrintErrorWithNoteToStderr(osArgs, err.Error(), "")
+		return
 	}
 
 	options := newBuildOptions()
@@ -1287,9 +1372,10 @@ func serveImpl(osArgs []string) error {
 	options.LogLimit = 5
 	options.LogLevel = api.LogLevelInfo
 
-	if _, err := parseOptionsImpl(filteredArgs, &options, nil, kindInternal); err != nil {
-		logger.PrintErrorToStderr(filteredArgs, err.Text)
-		return errors.New(err.Text)
+	extras, errWithNote := parseOptionsImpl(filteredArgs, &options, nil, kindInternal)
+	if errWithNote != nil {
+		logger.PrintErrorWithNoteToStderr(osArgs, errWithNote.Text, errWithNote.Note)
+		return
 	}
 
 	serveOptions.OnRequest = func(args api.ServeOnRequestArgs) {
@@ -1306,58 +1392,28 @@ func serveImpl(osArgs []string) error {
 		})
 	}
 
-	result, err := api.Serve(serveOptions, options)
-	if err != nil {
-		return err
+	// Validate build options
+	ctx, ctxErr := api.Context(options)
+	if ctxErr != nil {
+		return
 	}
 
-	// Show what actually got bound if the port was 0
-	logger.PrintText(os.Stderr, logger.LevelInfo, filteredArgs, func(colors logger.Colors) string {
-		var hosts []string
-		sb := strings.Builder{}
-		sb.WriteString(colors.Reset)
+	// Try to enable serve mode
+	if _, err = ctx.Serve(serveOptions); err != nil {
+		logger.PrintErrorWithNoteToStderr(osArgs, err.Error(), "")
+		return
+	}
 
-		// If this is "0.0.0.0" or "::", list all relevant IP addresses
-		if ip := net.ParseIP(result.Host); ip != nil && ip.IsUnspecified() {
-			if addrs, err := net.InterfaceAddrs(); err == nil {
-				for _, addr := range addrs {
-					if addr, ok := addr.(*net.IPNet); ok && (addr.IP.To4() != nil) == (ip.To4() != nil) && !addr.IP.IsLinkLocalUnicast() {
-						hosts = append(hosts, addr.IP.String())
-					}
-				}
-			}
+	// Also enable watch mode if it was requested
+	if extras.watch {
+		if err := ctx.Watch(api.WatchOptions{}); err != nil {
+			logger.PrintErrorWithNoteToStderr(osArgs, err.Error(), "")
+			return
 		}
+	}
 
-		// Otherwise, just list the one IP address
-		if len(hosts) == 0 {
-			hosts = append(hosts, result.Host)
-		}
-
-		// Determine the host kinds
-		kinds := make([]string, len(hosts))
-		maxLen := 0
-		for i, host := range hosts {
-			kind := "Network"
-			if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-				kind = "Local"
-			}
-			kinds[i] = kind
-			if len(kind) > maxLen {
-				maxLen = len(kind)
-			}
-		}
-
-		// Pretty-print the host list
-		for i, kind := range kinds {
-			sb.WriteString(fmt.Sprintf("\n > %s:%s %shttp://%s/%s",
-				kind, strings.Repeat(" ", maxLen-len(kind)), colors.Underline,
-				net.JoinHostPort(hosts[i], fmt.Sprintf("%d", result.Port)), colors.Reset))
-		}
-
-		sb.WriteString("\n\n")
-		return sb.String()
-	})
-	return result.Wait()
+	// Do not exit if we're in serve mode
+	<-make(chan struct{})
 }
 
 func parseLogLevel(value string, arg string) (api.LogLevel, *cli_helpers.ErrorWithNote) {

@@ -1,5 +1,10 @@
 package cli
 
+// The mangle cache is a JSON file that remembers esbuild's property renaming
+// decisions. It's a flat map where the keys are strings and the values are
+// either strings or the boolean value "false". This is the case both in JSON
+// and in Go (so the "interface{}" values are also either strings or "false").
+
 import (
 	"fmt"
 	"sort"
@@ -11,7 +16,6 @@ import (
 	"github.com/evanw/esbuild/internal/js_ast"
 	"github.com/evanw/esbuild/internal/js_lexer"
 	"github.com/evanw/esbuild/internal/js_parser"
-	"github.com/evanw/esbuild/internal/js_printer"
 	"github.com/evanw/esbuild/internal/logger"
 )
 
@@ -19,7 +23,6 @@ func parseMangleCache(osArgs []string, fs fs.FS, absPath string) (map[string]int
 	// Log problems with the mangle cache to stderr
 	log := logger.NewStderrLog(logger.OutputOptionsForArgs(osArgs))
 	defer log.Done()
-	// log.AddMsg(msg)
 
 	// Try to read the existing file
 	prettyPath := absPath
@@ -130,12 +133,12 @@ func printMangleCache(mangleCache map[string]interface{}, originalOrder []string
 		} else {
 			j.AddString("\n  ")
 		}
-		j.AddBytes(js_printer.QuoteForJSON(key, asciiOnly))
+		j.AddBytes(helpers.QuoteForJSON(key, asciiOnly))
 
 		// Print the value
 		if value := mangleCache[key]; value != false {
 			j.AddString(": ")
-			j.AddBytes(js_printer.QuoteForJSON(value.(string), asciiOnly))
+			j.AddBytes(helpers.QuoteForJSON(value.(string), asciiOnly))
 		} else {
 			j.AddString(": false")
 		}

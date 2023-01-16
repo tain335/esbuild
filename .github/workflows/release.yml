@@ -4,12 +4,16 @@ on:
   push:
     tags: ['v*']
 
+permissions: {}
 jobs:
   release:
+    permissions:
+      contents: write  #  to create a release (actions/create-release)
+
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
 
       - name: Extract changelog
         run: |

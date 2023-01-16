@@ -1,4 +1,4 @@
-import * as types from "../shared/types"
+import type * as types from "../shared/types"
 import * as common from "../shared/common"
 import * as ourselves from "./mod"
 import * as denoflate from "https://deno.land/x/denoflate@1.2.1/mod.ts"
@@ -7,15 +7,15 @@ declare const ESBUILD_VERSION: string
 
 export let version = ESBUILD_VERSION
 
-export let build: typeof types.build = (options: types.BuildOptions): Promise<any> =>
+export let build: typeof types.build = (options: types.BuildOptions) =>
   ensureServiceIsRunning().then(service =>
     service.build(options))
 
-export const serve: typeof types.serve = (serveOptions, buildOptions) =>
+export const context: typeof types.context = (options: types.BuildOptions) =>
   ensureServiceIsRunning().then(service =>
-    service.serve(serveOptions, buildOptions))
+    service.context(options))
 
-export const transform: typeof types.transform = (input, options) =>
+export const transform: typeof types.transform = (input: string | Uint8Array, options?: types.TransformOptions) =>
   ensureServiceIsRunning().then(service =>
     service.transform(input, options))
 
@@ -67,7 +67,8 @@ async function installFromNPM(name: string, subpath: string): Promise<string> {
   } catch (e) {
   }
 
-  const url = `https://registry.npmjs.org/${name}/-/${name}-${version}.tgz`
+  const npmRegistry = Deno.env.get("NPM_CONFIG_REGISTRY") || "https://registry.npmjs.org";
+  const url = `${npmRegistry}/${name}/-/${name.replace("@esbuild/", "")}-${version}.tgz`;
   const buffer = await fetch(url).then(r => r.arrayBuffer())
   const executable = extractFileFromTarGzip(new Uint8Array(buffer), subpath)
 
@@ -112,7 +113,7 @@ function getCachePath(name: string): { finalPath: string, finalDir: string } {
 
   if (!baseDir) throw new Error('Failed to find cache directory')
   const finalDir = baseDir + `/esbuild/bin`
-  const finalPath = finalDir + `/${name}@${version}`
+  const finalPath = finalDir + `/${name.replace('/', '-')}@${version}`
   return { finalPath, finalDir }
 }
 
@@ -143,17 +144,17 @@ async function install(): Promise<string> {
 
   const platformKey = Deno.build.target
   const knownWindowsPackages: Record<string, string> = {
-    'x86_64-pc-windows-msvc': 'esbuild-windows-64',
+    'x86_64-pc-windows-msvc': '@esbuild/win32-x64',
   }
   const knownUnixlikePackages: Record<string, string> = {
     // These are the only platforms that Deno supports
-    'aarch64-apple-darwin': 'esbuild-darwin-arm64',
-    'aarch64-unknown-linux-gnu': 'esbuild-linux-arm64',
-    'x86_64-apple-darwin': 'esbuild-darwin-64',
-    'x86_64-unknown-linux-gnu': 'esbuild-linux-64',
+    'aarch64-apple-darwin': '@esbuild/darwin-arm64',
+    'aarch64-unknown-linux-gnu': '@esbuild/linux-arm64',
+    'x86_64-apple-darwin': '@esbuild/darwin-x64',
+    'x86_64-unknown-linux-gnu': '@esbuild/linux-x64',
 
     // These platforms are not supported by Deno
-    'x86_64-unknown-freebsd': 'esbuild-freebsd-64',
+    'x86_64-unknown-freebsd': '@esbuild/freebsd-x64',
   }
 
   // Pick a package to install
@@ -168,7 +169,7 @@ async function install(): Promise<string> {
 
 interface Service {
   build: typeof types.build
-  serve: typeof types.serve
+  context: typeof types.context
   transform: typeof types.transform
   formatMessages: typeof types.formatMessages
   analyzeMetafile: typeof types.analyzeMetafile
@@ -223,7 +224,7 @@ let ensureServiceIsRunning = (): Promise<Service> => {
           startWriteFromQueueWorker()
         },
         isSync: false,
-        isWriteUnavailable: false,
+        hasFS: true,
         esbuild: ourselves,
       })
 
@@ -246,36 +247,31 @@ let ensureServiceIsRunning = (): Promise<Service> => {
       readMoreStdout()
 
       return {
-        build: (options: types.BuildOptions): Promise<any> => {
-          return new Promise<types.BuildResult>((resolve, reject) => {
-            service.buildOrServe({
+        build: (options: types.BuildOptions) =>
+          new Promise<types.BuildResult>((resolve, reject) => {
+            service.buildOrContext({
               callName: 'build',
               refs: null,
-              serveOptions: null,
               options,
               isTTY,
               defaultWD,
               callback: (err, res) => err ? reject(err) : resolve(res as types.BuildResult),
             })
-          })
-        },
+          }),
 
-        serve: (serveOptions, buildOptions) => {
-          if (serveOptions === null || typeof serveOptions !== 'object')
-            throw new Error('The first argument must be an object')
-          return new Promise((resolve, reject) =>
-            service.buildOrServe({
-              callName: 'serve',
+        context: (options: types.BuildOptions) =>
+          new Promise<types.BuildContext>((resolve, reject) =>
+            service.buildOrContext({
+              callName: 'context',
               refs: null,
-              serveOptions,
-              options: buildOptions,
+              options,
               isTTY,
-              defaultWD, callback: (err, res) => err ? reject(err) : resolve(res as types.ServeResult),
-            }))
-        },
+              defaultWD,
+              callback: (err, res) => err ? reject(err) : resolve(res as types.BuildContext),
+            })),
 
-        transform: (input, options) => {
-          return new Promise((resolve, reject) =>
+        transform: (input: string | Uint8Array, options?: types.TransformOptions) =>
+          new Promise<types.TransformResult>((resolve, reject) =>
             service.transform({
               callName: 'transform',
               refs: null,
@@ -298,37 +294,34 @@ let ensureServiceIsRunning = (): Promise<Service> => {
                 },
                 writeFile(contents, callback) {
                   Deno.makeTempFile().then(
-                    tempFile => Deno.writeFile(tempFile, new TextEncoder().encode(contents)).then(
+                    tempFile => Deno.writeFile(tempFile, typeof contents === 'string' ? new TextEncoder().encode(contents) : contents).then(
                       () => callback(tempFile),
                       () => callback(null)),
                     () => callback(null))
                 },
               },
               callback: (err, res) => err ? reject(err) : resolve(res!),
-            }))
-        },
+            })),
 
-        formatMessages: (messages, options) => {
-          return new Promise((resolve, reject) =>
+        formatMessages: (messages, options) =>
+          new Promise((resolve, reject) =>
             service.formatMessages({
               callName: 'formatMessages',
               refs: null,
               messages,
               options,
               callback: (err, res) => err ? reject(err) : resolve(res!),
-            }))
-        },
+            })),
 
-        analyzeMetafile: (metafile, options) => {
-          return new Promise((resolve, reject) =>
+        analyzeMetafile: (metafile, options) =>
+          new Promise((resolve, reject) =>
             service.analyzeMetafile({
               callName: 'analyzeMetafile',
               refs: null,
               metafile: typeof metafile === 'string' ? metafile : JSON.stringify(metafile),
               options,
               callback: (err, res) => err ? reject(err) : resolve(res!),
-            }))
-        },
+            })),
       }
     })()
   }

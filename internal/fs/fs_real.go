@@ -42,7 +42,7 @@ type watchState uint8
 const (
 	stateNone                  watchState = iota
 	stateDirHasAccessedEntries            // Compare "accessedEntries"
-	stateDirMissing                       // Compare directory presence
+	stateDirUnreadable                    // Compare directory readability
 	stateFileHasModKey                    // Compare "modKey"
 	stateFileNeedModKey                   // Need to transition to "stateFileHasModKey" or "stateFileUnusableModKey" before "WatchData()" returns
 	stateFileMissing                      // Compare file presence
@@ -110,12 +110,21 @@ func RealFS(options RealFSOptions) (FS, error) {
 		watchData = make(map[string]privateWatchData)
 	}
 
-	return &realFS{
+	var result FS = &realFS{
 		entries:           make(map[string]entriesOrErr),
 		fp:                fp,
 		watchData:         watchData,
 		doNotCacheEntries: options.DoNotCache,
-	}, nil
+	}
+
+	// Add a wrapper that lets us traverse into ".zip" files. This is what yarn
+	// uses as a package format when in yarn is in its "PnP" mode.
+	result = &zipFS{
+		inner:    result,
+		zipFiles: make(map[string]*zipFile),
+	}
+
+	return result, nil
 }
 
 func (fs *realFS) ReadDirectory(dir string) (entries DirEntries, canonicalError error, originalError error) {
@@ -161,7 +170,7 @@ func (fs *realFS) ReadDirectory(dir string) (entries DirEntries, canonicalError 
 		fs.watchMutex.Lock()
 		state := stateDirHasAccessedEntries
 		if canonicalError != nil {
-			state = stateDirMissing
+			state = stateDirUnreadable
 		}
 		entries.accessedEntries = &accessedEntries{wasPresent: make(map[string]bool)}
 		fs.watchData[dir] = privateWatchData{
@@ -340,11 +349,12 @@ func (fs *realFS) readdir(dirname string) (entries []string, canonicalError erro
 	}
 
 	defer f.Close()
-	entries, err := f.Readdirnames(-1)
+	entries, originalError = f.Readdirnames(-1)
+	canonicalError = originalError
 
 	// Unwrap to get the underlying error
-	if syscallErr, ok := err.(*os.SyscallError); ok {
-		err = syscallErr.Unwrap()
+	if syscallErr, ok := canonicalError.(*os.SyscallError); ok {
+		canonicalError = syscallErr.Unwrap()
 	}
 
 	// Don't convert ENOTDIR to ENOENT here. ENOTDIR is a legitimate error
@@ -395,33 +405,21 @@ func (fs *realFS) kind(dir string, base string) (symlink string, kind EntryKind)
 
 	// Follow symlinks now so the cache contains the translation
 	if (mode & os.ModeSymlink) != 0 {
-		symlink = entryPath
-		linksWalked := 0
-		for {
-			linksWalked++
-			if linksWalked > 255 {
-				return // Error: too many links
-			}
-			link, err := os.Readlink(symlink)
-			if err != nil {
-				return // Skip over this entry
-			}
-			if !fs.fp.isAbs(link) {
-				link = fs.fp.join([]string{dir, link})
-			}
-			symlink = fs.fp.clean(link)
-
-			// Re-run "lstat" on the symlink target
-			stat2, err2 := os.Lstat(symlink)
-			if err2 != nil {
-				return // Skip over this entry
-			}
-			mode = stat2.Mode()
-			if (mode & os.ModeSymlink) == 0 {
-				break
-			}
-			dir = fs.fp.dir(symlink)
+		link, err := fs.fp.evalSymlinks(entryPath)
+		if err != nil {
+			return // Skip over this entry
 		}
+
+		// Re-run "lstat" on the symlink target to see if it's a file or not
+		stat2, err2 := os.Lstat(link)
+		if err2 != nil {
+			return // Skip over this entry
+		}
+		mode = stat2.Mode()
+		if (mode & os.ModeSymlink) != 0 {
+			return // This should no longer be a symlink, so this is unexpected
+		}
+		symlink = link
 	}
 
 	// We consider the entry either a directory or a file
@@ -455,10 +453,10 @@ func (fs *realFS) WatchData() WatchData {
 		}
 
 		switch data.state {
-		case stateDirMissing:
+		case stateDirUnreadable:
 			paths[path] = func() string {
-				info, err := os.Stat(path)
-				if err == nil && info.IsDir() {
+				_, err, _ := fs.readdir(path)
+				if err == nil {
 					return path
 				}
 				return ""
@@ -485,13 +483,13 @@ func (fs *realFS) WatchData() WatchData {
 					}
 				} else {
 					// Check individual entries
-					isPresent := make(map[string]bool, len(names))
+					lookup := make(map[string]string, len(names))
 					for _, name := range names {
-						isPresent[strings.ToLower(name)] = true
+						lookup[strings.ToLower(name)] = name
 					}
 					for name, wasPresent := range data.accessedEntries.wasPresent {
-						if wasPresent != isPresent[name] {
-							return fs.Join(path, name)
+						if originalName, isPresent := lookup[name]; wasPresent != isPresent {
+							return fs.Join(path, originalName)
 						}
 					}
 				}

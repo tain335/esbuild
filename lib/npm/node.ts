@@ -1,4 +1,4 @@
-import * as types from "../shared/types";
+import type * as types from "../shared/types";
 import * as common from "../shared/common";
 import * as ourselves from "./node"
 import { ESBUILD_BINARY_PATH, generateBinPath } from "./node-platform";
@@ -66,13 +66,13 @@ let esbuildCommandAndArgs = (): [string, string[]] => {
 
   if (WASM) {
     return ['node', [path.join(__dirname, '..', 'bin', 'esbuild')]];
-  }
-
-  const { binPath, isWASM } = generateBinPath()
-  if (isWASM) {
-    return ['node', [binPath]]
   } else {
-    return [binPath, []];
+    const { binPath, isWASM } = generateBinPath()
+    if (isWASM) {
+      return ['node', [binPath]]
+    } else {
+      return [binPath, []];
+    }
   }
 };
 
@@ -130,13 +130,13 @@ let fsAsync: common.StreamFS = {
 
 export let version = ESBUILD_VERSION;
 
-export let build: typeof types.build = (options: types.BuildOptions): Promise<any> =>
+export let build: typeof types.build = (options: types.BuildOptions) =>
   ensureServiceIsRunning().build(options);
 
-export let serve: typeof types.serve = (serveOptions, buildOptions) =>
-  ensureServiceIsRunning().serve(serveOptions, buildOptions);
+export let context: typeof types.context = (buildOptions: types.BuildOptions) =>
+  ensureServiceIsRunning().context(buildOptions);
 
-export let transform: typeof types.transform = (input, options) =>
+export let transform: typeof types.transform = (input: string | Uint8Array, options?: types.TransformOptions) =>
   ensureServiceIsRunning().transform(input, options);
 
 export let formatMessages: typeof types.formatMessages = (messages, options) =>
@@ -145,7 +145,7 @@ export let formatMessages: typeof types.formatMessages = (messages, options) =>
 export let analyzeMetafile: typeof types.analyzeMetafile = (messages, options) =>
   ensureServiceIsRunning().analyzeMetafile(messages, options);
 
-export let buildSync: typeof types.buildSync = (options: types.BuildOptions): any => {
+export let buildSync: typeof types.buildSync = (options: types.BuildOptions) => {
   // Try using a long-lived worker thread to avoid repeated start-up overhead
   if (worker_threads && !isInternalWorkerThread) {
     if (!workerThreadService) workerThreadService = startWorkerThreadService(worker_threads);
@@ -153,10 +153,9 @@ export let buildSync: typeof types.buildSync = (options: types.BuildOptions): an
   }
 
   let result: types.BuildResult;
-  runServiceSync(service => service.buildOrServe({
+  runServiceSync(service => service.buildOrContext({
     callName: 'buildSync',
     refs: null,
-    serveOptions: null,
     options,
     isTTY: isTTY(),
     defaultWD,
@@ -165,7 +164,7 @@ export let buildSync: typeof types.buildSync = (options: types.BuildOptions): an
   return result!;
 };
 
-export let transformSync: typeof types.transformSync = (input, options) => {
+export let transformSync: typeof types.transformSync = (input: string | Uint8Array, options?: types.TransformOptions) => {
   // Try using a long-lived worker thread to avoid repeated start-up overhead
   if (worker_threads && !isInternalWorkerThread) {
     if (!workerThreadService) workerThreadService = startWorkerThreadService(worker_threads);
@@ -236,7 +235,7 @@ export let initialize: typeof types.initialize = options => {
 
 interface Service {
   build: typeof types.build;
-  serve: typeof types.serve;
+  context: typeof types.context;
   transform: typeof types.transform;
   formatMessages: typeof types.formatMessages;
   analyzeMetafile: typeof types.analyzeMetafile;
@@ -263,7 +262,7 @@ let ensureServiceIsRunning = (): Service => {
     },
     readFileSync: fs.readFileSync,
     isSync: false,
-    isWriteUnavailable: false,
+    hasFS: true,
     esbuild: ourselves,
   });
 
@@ -294,34 +293,31 @@ let ensureServiceIsRunning = (): Service => {
   }
 
   longLivedService = {
-    build: (options: types.BuildOptions): Promise<any> => {
-      return new Promise<types.BuildResult>((resolve, reject) => {
-        service.buildOrServe({
+    build: (options: types.BuildOptions) =>
+      new Promise<types.BuildResult>((resolve, reject) => {
+        service.buildOrContext({
           callName: 'build',
           refs,
-          serveOptions: null,
           options,
           isTTY: isTTY(),
           defaultWD,
           callback: (err, res) => err ? reject(err) : resolve(res as types.BuildResult),
         })
-      })
-    },
-    serve: (serveOptions, buildOptions) => {
-      if (serveOptions === null || typeof serveOptions !== 'object')
-        throw new Error('The first argument must be an object')
-      return new Promise((resolve, reject) =>
-        service.buildOrServe({
-          callName: 'serve',
+      }),
+
+    context: (options: types.BuildOptions) =>
+      new Promise<types.BuildContext>((resolve, reject) =>
+        service.buildOrContext({
+          callName: 'context',
           refs,
-          serveOptions,
-          options: buildOptions,
+          options,
           isTTY: isTTY(),
-          defaultWD, callback: (err, res) => err ? reject(err) : resolve(res as types.ServeResult),
-        }))
-    },
-    transform: (input, options) => {
-      return new Promise((resolve, reject) =>
+          defaultWD,
+          callback: (err, res) => err ? reject(err) : resolve(res as types.BuildContext),
+        })),
+
+    transform: (input: string | Uint8Array, options?: types.TransformOptions) =>
+      new Promise<types.TransformResult>((resolve, reject) =>
         service.transform({
           callName: 'transform',
           refs,
@@ -330,28 +326,27 @@ let ensureServiceIsRunning = (): Service => {
           isTTY: isTTY(),
           fs: fsAsync,
           callback: (err, res) => err ? reject(err) : resolve(res!),
-        }));
-    },
-    formatMessages: (messages, options) => {
-      return new Promise((resolve, reject) =>
+        })),
+
+    formatMessages: (messages, options) =>
+      new Promise((resolve, reject) =>
         service.formatMessages({
           callName: 'formatMessages',
           refs,
           messages,
           options,
           callback: (err, res) => err ? reject(err) : resolve(res!),
-        }));
-    },
-    analyzeMetafile: (metafile, options) => {
-      return new Promise((resolve, reject) =>
+        })),
+
+    analyzeMetafile: (metafile, options) =>
+      new Promise((resolve, reject) =>
         service.analyzeMetafile({
           callName: 'analyzeMetafile',
           refs,
           metafile: typeof metafile === 'string' ? metafile : JSON.stringify(metafile),
           options,
           callback: (err, res) => err ? reject(err) : resolve(res!),
-        }));
-    },
+        })),
   };
   return longLivedService;
 }
@@ -365,7 +360,7 @@ let runServiceSync = (callback: (service: common.StreamService) => void): void =
       stdin = bytes;
     },
     isSync: true,
-    isWriteUnavailable: false,
+    hasFS: true,
     esbuild: ourselves,
   });
   callback(service);
@@ -397,7 +392,7 @@ interface MainToWorkerMessage {
 
 interface WorkerThreadService {
   buildSync(options: types.BuildOptions): types.BuildResult;
-  transformSync: typeof types.transformSync;
+  transformSync(input: string | Uint8Array, options?: types.TransformOptions): types.TransformResult;
   formatMessagesSync: typeof types.formatMessagesSync;
   analyzeMetafileSync: typeof types.analyzeMetafileSync;
 }
@@ -422,7 +417,6 @@ let startWorkerThreadService = (worker_threads: typeof import('worker_threads'))
     execArgv: [],
   });
   let nextID = 0;
-  let wasStopped = false;
 
   // This forbids options which would cause structured clone errors
   let fakeBuildError = (text: string) => {
@@ -435,11 +429,7 @@ let startWorkerThreadService = (worker_threads: typeof import('worker_threads'))
   let validateBuildSyncOptions = (options: types.BuildOptions | undefined): void => {
     if (!options) return
     let plugins = options.plugins
-    let incremental = options.incremental
-    let watch = options.watch
     if (plugins && plugins.length > 0) throw fakeBuildError(`Cannot use plugins in synchronous API calls`);
-    if (incremental) throw fakeBuildError(`Cannot use "incremental" with a synchronous build`);
-    if (watch) throw fakeBuildError(`Cannot use "watch" with a synchronous build`);
   };
 
   // MessagePort doesn't copy the properties of Error objects. We still want
@@ -452,7 +442,6 @@ let startWorkerThreadService = (worker_threads: typeof import('worker_threads'))
   };
 
   let runCallSync = (command: string, args: any[]): any => {
-    if (wasStopped) throw new Error('The service was stopped');
     let id = nextID++;
 
     // Make a fresh shared buffer for every request. That way we can't have a
@@ -509,12 +498,6 @@ let startWorkerThreadService = (worker_threads: typeof import('worker_threads'))
 let startSyncServiceWorker = () => {
   let workerPort: import('worker_threads').MessagePort = worker_threads!.workerData.workerPort;
   let parentPort = worker_threads!.parentPort!;
-  let service = ensureServiceIsRunning();
-
-  // Take the default working directory from the main thread because we want it
-  // to be consistent. This will be the working directory that was current at
-  // the time the "esbuild" package was first imported.
-  defaultWD = worker_threads!.workerData.defaultWD;
 
   // MessagePort doesn't copy the properties of Error objects. We still want
   // error objects to have extra properties such as "warnings" so implement the
@@ -529,35 +512,68 @@ let startSyncServiceWorker = () => {
     return properties;
   };
 
-  parentPort.on('message', (msg: MainToWorkerMessage) => {
-    (async () => {
-      let { sharedBuffer, id, command, args } = msg;
-      let sharedBufferView = new Int32Array(sharedBuffer);
+  try {
+    let service = ensureServiceIsRunning();
 
-      try {
-        switch (command) {
-          case 'build':
-            workerPort.postMessage({ id, resolve: await service.build(args[0]) });
-            break;
+    // Take the default working directory from the main thread because we want it
+    // to be consistent. This will be the working directory that was current at
+    // the time the "esbuild" package was first imported.
+    defaultWD = worker_threads!.workerData.defaultWD;
 
-          case 'transform':
-            workerPort.postMessage({ id, resolve: await service.transform(args[0], args[1]) });
-            break;
+    parentPort.on('message', (msg: MainToWorkerMessage) => {
+      (async () => {
+        let { sharedBuffer, id, command, args } = msg;
+        let sharedBufferView = new Int32Array(sharedBuffer);
 
-          case 'formatMessages':
-            workerPort.postMessage({ id, resolve: await service.formatMessages(args[0], args[1]) });
-            break;
+        try {
+          switch (command) {
+            case 'build':
+              workerPort.postMessage({ id, resolve: await service.build(args[0]) });
+              break;
 
-          case 'analyzeMetafile':
-            workerPort.postMessage({ id, resolve: await service.analyzeMetafile(args[0], args[1]) });
-            break;
+            case 'transform':
+              workerPort.postMessage({ id, resolve: await service.transform(args[0], args[1]) });
+              break;
 
-          default:
-            throw new Error(`Invalid command: ${command}`);
+            case 'formatMessages':
+              workerPort.postMessage({ id, resolve: await service.formatMessages(args[0], args[1]) });
+              break;
+
+            case 'analyzeMetafile':
+              workerPort.postMessage({ id, resolve: await service.analyzeMetafile(args[0], args[1]) });
+              break;
+
+            default:
+              throw new Error(`Invalid command: ${command}`);
+          }
+        } catch (reject) {
+          workerPort.postMessage({ id, reject, properties: extractProperties(reject) });
         }
-      } catch (reject) {
-        workerPort.postMessage({ id, reject, properties: extractProperties(reject) });
-      }
+
+        // The message has already been posted by this point, so it should be
+        // safe to wake the main thread. The main thread should always get the
+        // message we sent above.
+
+        // First, change the shared value. That way if the main thread attempts
+        // to wait for us after this point, the wait will fail because the shared
+        // value has changed.
+        Atomics.add(sharedBufferView, 0, 1);
+
+        // Then, wake the main thread. This handles the case where the main
+        // thread was already waiting for us before the shared value was changed.
+        Atomics.notify(sharedBufferView, 0, Infinity);
+      })();
+    });
+  }
+
+  // Creating the service can fail if the on-disk state is corrupt. In that case
+  // we just fail all incoming messages with whatever error message we got.
+  // Otherwise incoming messages will hang forever waiting for a reply.
+  catch (reject) {
+    parentPort.on('message', (msg: MainToWorkerMessage) => {
+      let { sharedBuffer, id } = msg;
+      let sharedBufferView = new Int32Array(sharedBuffer);
+      workerPort.postMessage({ id, reject, properties: extractProperties(reject) });
 
       // The message has already been posted by this point, so it should be
       // safe to wake the main thread. The main thread should always get the
@@ -571,8 +587,8 @@ let startSyncServiceWorker = () => {
       // Then, wake the main thread. This handles the case where the main
       // thread was already waiting for us before the shared value was changed.
       Atomics.notify(sharedBufferView, 0, Infinity);
-    })();
-  });
+    });
+  }
 };
 
 // If we're in the worker thread, start the worker code

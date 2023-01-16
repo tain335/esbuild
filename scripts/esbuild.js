@@ -49,6 +49,7 @@ const buildNeutralLib = (esbuildPath) => {
     '--outfile=' + path.join(binDir, 'esbuild'),
     '--bundle',
     '--target=' + nodeTarget,
+    '--define:ESBUILD_VERSION=' + JSON.stringify(version),
     '--external:esbuild',
     '--platform=node',
     '--log-level=warning',
@@ -185,37 +186,17 @@ exports.buildWasmLib = async (esbuildPath) => {
     fs.writeFileSync(path.join(esmDir, minify ? 'browser.min.js' : 'browser.js'), browserESM)
   }
 
-  // Generate the "exit0" stubs
-  const exit0Map = {};
-  const exit0Dir = path.join(repoDir, 'lib', 'npm', 'exit0');
-  for (const entry of fs.readdirSync(exit0Dir)) {
-    if (entry.endsWith('.node')) {
-      const absPath = path.join(exit0Dir, entry);
-      const compressed = zlib.deflateRawSync(fs.readFileSync(absPath), { level: 9 });
-      exit0Map[entry] = compressed.toString('base64');
-    }
-  }
-  const exit0Code = `
-// Each of these is a native module that calls "exit(0)". This is a workaround
-// for https://github.com/nodejs/node/issues/36616. These native modules are
-// stored in a string both to make them smaller and to hide them from Yarn 2,
-// since they make Yarn 2 unzip this package.
-
-module.exports = ${JSON.stringify(exit0Map, null, 2)};
-`;
-  fs.writeFileSync(path.join(npmWasmDir, 'exit0.js'), exit0Code);
-
   // Join with the asynchronous WebAssembly build
   await goBuildPromise;
 
   // Also copy this into the WebAssembly shim directories
   for (const dir of [
-    path.join(repoDir, 'npm', 'esbuild-android-64'),
+    path.join(repoDir, 'npm', '@esbuild', 'android-arm'),
+    path.join(repoDir, 'npm', '@esbuild', 'android-x64'),
   ]) {
     fs.mkdirSync(path.join(dir, 'bin'), { recursive: true })
     fs.writeFileSync(path.join(dir, 'wasm_exec.js'), wasm_exec_js);
     fs.writeFileSync(path.join(dir, 'wasm_exec_node.js'), wasm_exec_node_js);
-    fs.writeFileSync(path.join(dir, 'exit0.js'), exit0Code);
     fs.copyFileSync(path.join(npmWasmDir, 'bin', 'esbuild'), path.join(dir, 'bin', 'esbuild'));
     fs.copyFileSync(path.join(npmWasmDir, 'esbuild.wasm'), path.join(dir, 'esbuild.wasm'));
   }
@@ -304,6 +285,7 @@ exports.removeRecursiveSync = path => {
 const updateVersionPackageJSON = pathToPackageJSON => {
   const version = fs.readFileSync(path.join(path.dirname(__dirname), 'version.txt'), 'utf8').trim()
   const json = JSON.parse(fs.readFileSync(pathToPackageJSON, 'utf8'))
+
   if (json.version !== version) {
     json.version = version
     fs.writeFileSync(pathToPackageJSON, JSON.stringify(json, null, 2) + '\n')
@@ -328,7 +310,7 @@ exports.installForTests = () => {
   fs.mkdirSync(installDir)
   fs.writeFileSync(path.join(installDir, 'package.json'), '{}')
   childProcess.execSync(`npm pack --silent "${npmDir}"`, { cwd: installDir, stdio: 'inherit' })
-  childProcess.execSync(`npm install --silent --no-audit --progress=false esbuild-${version}.tgz`, { cwd: installDir, env, stdio: 'inherit' })
+  childProcess.execSync(`npm install --silent --no-audit --no-optional --progress=false esbuild-${version}.tgz`, { cwd: installDir, env, stdio: 'inherit' })
 
   // Evaluate the code
   const ESBUILD_PACKAGE_PATH = path.join(installDir, 'node_modules', 'esbuild')
