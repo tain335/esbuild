@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"time"
 
 	"github.com/evanw/esbuild/internal/ast"
 	"github.com/evanw/esbuild/internal/bundler"
@@ -36,13 +37,15 @@ var visitedMap = make(map[uint32]bool)
 
 var headStmts = make([]js_ast.Stmt, 0, 64)
 var tailStmts = make([]js_ast.Stmt, 0, 64)
-var isESModule = false
-var shouldRemoveNextExportStmt = false
 
 // cache
 var packModuleCache = make(map[string]PackModule)
 var chunkPackModules = make(map[string]map[string]PackModule)
 var newChunkPackModules = make(map[string]map[string]PackModule)
+
+// import d from 'mod'
+// 解决循环引用
+var renameIdentifierExportCache = make(map[js_ast.Ref]js_ast.Expr)
 
 var currentHash string
 
@@ -109,8 +112,26 @@ func generateCJS(log logger.Log, g *graph.LinkerGraph, module *graph.JSRepr) *js
 		}
 		module.AST.Parts = append(module.AST.Parts, newPart)
 	}
-	part := &module.AST.Parts[1]
-	part.Stmts = []js_ast.Stmt{
+	// TODO 为什么有的cjs模块是3部分
+	// var a = 1
+	// var lodash;
+	// if (typeof require === "function") {
+	//   try {
+	//     lodash = require("./test");
+	//   } catch (e) {}
+	// }
+
+	// if (!lodash) {
+	//   lodash = window._;
+	// }
+
+	// module.exports = lodash;
+	if module.AST.ExportsKind == js_ast.ExportsCommonJS && len(module.AST.Parts) == 3 {
+		module.AST.Parts = []js_ast.Part{module.AST.Parts[0], module.AST.Parts[2]}
+	}
+	mainPart := &module.AST.Parts[1]
+
+	mainPart.Stmts = []js_ast.Stmt{
 		{
 			Data: &js_ast.SExpr{
 				Value: js_ast.Expr{
@@ -141,7 +162,7 @@ func generateCJS(log logger.Log, g *graph.LinkerGraph, module *graph.JSRepr) *js
 							},
 							Body: js_ast.FnBody{
 								Block: js_ast.SBlock{
-									Stmts: part.Stmts,
+									Stmts: mainPart.Stmts,
 								},
 							},
 						},
@@ -150,6 +171,7 @@ func generateCJS(log logger.Log, g *graph.LinkerGraph, module *graph.JSRepr) *js
 			},
 		},
 	}
+
 	// TODO 可以移除
 	module.AST.Symbols = g.Symbols.SymbolsForSource[module.AST.ModuleRef.SourceIndex]
 	return &module.AST
@@ -183,20 +205,23 @@ func transformCSSToJS(log logger.Log, g *graph.LinkerGraph, module *graph.JSRepr
 	return generateCSSModule(log, g, g.Files[module.CSSSourceIndex.GetIndex()].InputFile.Source)
 }
 
-func transformOtherToJS(module *graph.JSRepr) *graph.JSRepr {
-	part := module.AST.Parts[1]
+func transformOtherToJS(log logger.Log, g *graph.LinkerGraph, module *graph.JSRepr) *graph.JSRepr {
+	part := &module.AST.Parts[1]
 	lazy, ok := part.Stmts[0].Data.(*js_ast.SLazyExport)
 	if !ok {
 		panic("Internal error")
 	}
-	part.Stmts = []js_ast.Stmt{js_ast.AssignStmt(
-		js_ast.Expr{Loc: lazy.Value.Loc, Data: &js_ast.EDot{
-			Target:  js_ast.Expr{Loc: lazy.Value.Loc, Data: &js_ast.EIdentifier{Ref: module.AST.ModuleRef}},
-			Name:    "exports",
-			NameLoc: lazy.Value.Loc,
-		}},
-		lazy.Value,
-	)}
+	part.Stmts = []js_ast.Stmt{
+		js_ast.AssignStmt(
+			js_ast.Expr{Loc: lazy.Value.Loc, Data: &js_ast.EDot{
+				Target:  js_ast.Expr{Loc: lazy.Value.Loc, Data: &js_ast.EIdentifier{Ref: module.AST.ModuleRef}},
+				Name:    "exports",
+				NameLoc: lazy.Value.Loc,
+			}},
+			lazy.Value,
+		),
+	}
+	g.GenerateSymbolImportAndUse(module.AST.ModuleRef.SourceIndex, 0, module.AST.ModuleRef, 1, module.AST.ModuleRef.SourceIndex)
 	module.AST.HasLazyExport = false
 	return module
 }
@@ -333,10 +358,10 @@ func resetReactRefreshContext() {
 // 第一遍记录组件/hook函数
 // 第二遍记录所有存在useHook的函数
 // 第三遍生成代码
-func registerReactSignature(g *graph.LinkerGraph, ast *js_ast.AST) {
+func registerReactSignature(g *graph.LinkerGraph, AST *js_ast.AST) {
 	compReg := regexp.MustCompile("^[A-Z]")
 	hookReg := regexp.MustCompile("^use[A-Z]")
-	stmts := ast.Parts[1].Stmts[0].Data.(*js_ast.SExpr).Value.Data.(*js_ast.EFunction).Fn.Body.Block.Stmts
+	stmts := AST.Parts[1].Stmts[0].Data.(*js_ast.SExpr).Value.Data.(*js_ast.EFunction).Fn.Body.Block.Stmts
 	for _, stmt := range stmts {
 		switch stmt.Data.(type) {
 		case *js_ast.SFunction:
@@ -577,20 +602,24 @@ func transformESMToCJS(log logger.Log, g *graph.LinkerGraph, ast *js_ast.AST) {
 	}
 
 	covertVistor := &js_ast.ASTVisitor{
-		VisitStmt: func(s *js_ast.Stmt, nodePath *js_ast.NodePath, iterator *js_ast.StmtIterator) {
+		EnterStmt: func(s *js_ast.Stmt, path *js_ast.NodePath, iterator *js_ast.StmtIterator) {
 			transformImportStmt(g, ast, s)
+		},
+		ExitStmt: func(s *js_ast.Stmt, nodePath *js_ast.NodePath, iterator *js_ast.StmtIterator) {
 			transformExportStmt(g, ast, s)
 		},
-		VisitExpr: func(e *js_ast.Expr, nodePath *js_ast.NodePath) {
+		EnterExpr: func(e *js_ast.Expr, nodePath *js_ast.NodePath) {
 			transformImportExpr(g, ast, e)
+			transformRenameExpr(g, ast, e)
 			if needReactRefresh {
 				registerReactHookUse(g, ast, e, nodePath)
 			}
 		},
 	}
+
 	js_ast.TraverseAST(ast.Parts, covertVistor)
 
-	if isESModule {
+	if ast.ExportsKind == js_ast.ExportsESM || ast.ExportsKind == js_ast.ExportsESMWithDynamicFallback {
 		markExportESM(g, ast)
 	}
 
@@ -620,10 +649,12 @@ func appendModule(log logger.Log, g *graph.LinkerGraph, chunkId string, packModu
 				source = g.Files[module.CSSSourceIndex.GetIndex()].InputFile.Source
 				module = transformCSSToJS(log, g, module)
 			} else {
-				module = transformOtherToJS(module)
+				module = transformOtherToJS(log, g, module)
 			}
 		}
+
 		CJSWrapperAST = generateCJS(log, g, module)
+
 		importRecords := *module.ImportRecords()
 
 		// 针对js引入css，改写引入的路径
@@ -640,14 +671,15 @@ func appendModule(log logger.Log, g *graph.LinkerGraph, chunkId string, packModu
 		tailStmts = []js_ast.Stmt{}
 		importRecordIndexSlice = []*uint32{}
 		originImportRecordIndex = []uint32{}
-		isESModule = false
+		renameIdentifierExportCache = make(map[js_ast.Ref]js_ast.Expr)
 
 		transformESMToCJS(log, g, CJSWrapperAST)
-
 	}
 
+	var cacheModule PackModule
+
 	if !cacheHit {
-		cacheModule := PackModule{
+		cacheModule = PackModule{
 			AST:                     CJSWrapperAST,
 			Source:                  source,
 			OriginImportRecordIndex: originImportRecordIndex,
@@ -672,6 +704,7 @@ func appendModule(log logger.Log, g *graph.LinkerGraph, chunkId string, packModu
 		nextSource := g.Files[index].InputFile.Source
 		appendModule(log, g, chunkId, packModules, nextSource, nextModule)
 	}
+
 }
 
 // TODO 把dev-client移动到graph.files上
@@ -756,111 +789,181 @@ func generateEntryChunk(
 func transformImportStmt(g *graph.LinkerGraph, AST *js_ast.AST, s *js_ast.Stmt) {
 	switch s.Data.(type) {
 	// import d from 'mod'
-	// import { dd } from 'mod'
+	// import { d } from 'mod'
+	// import * as d from 'mod'
 	case *js_ast.SImport:
-		isESModule = true
 		importStmt := s.Data.(*js_ast.SImport)
 		importRecord := &AST.ImportRecords[importStmt.ImportRecordIndex]
+
+		// 计算path
 		if importRecord.SourceIndex.IsValid() {
 			importRecord.Path = g.Files[importRecord.SourceIndex.GetIndex()].InputFile.Source.KeyPath
 		}
+
 		importRecord.Kind = ast.PackRequire
 		addImportRecordIndex(&importStmt.ImportRecordIndex)
-		if importStmt.DefaultName != nil {
-			defaultName := s.Data.(*js_ast.SImport).DefaultName
-			name := s.Data.(*js_ast.SImport).NamespaceRef
-			if defaultName != nil {
-				name = defaultName.Ref
+
+		// 计算exportKind
+		exportKind := js_ast.ExportsNone
+		if importRecord.SourceIndex.IsValid() {
+			if repr, ok := g.Files[importRecord.SourceIndex.GetIndex()].InputFile.Repr.(*graph.JSRepr); ok {
+				exportKind = repr.AST.ExportsKind
 			}
+		}
+
+		isESM := exportKind == js_ast.ExportsESM || exportKind == js_ast.ExportsESMWithDynamicFallback
+
+		if importStmt.DefaultName != nil {
+			defaultNameRef := importStmt.DefaultName.Ref
+
 			expr := &js_ast.ERequireString{
 				ImportRecordIndex: s.Data.(*js_ast.SImport).ImportRecordIndex,
 			}
 			addImportRecordIndex(&expr.ImportRecordIndex)
+
+			if isESM {
+				newDefaultNameRef := generateNewSymbol(g, AST, js_ast.SymbolHoisted, "_"+g.Symbols.Get(defaultNameRef).OriginalName+"_ESPACK_IMPROTED_MODULE_"+randHash(3))
+				renameIdentifierExportCache[defaultNameRef] = js_ast.Expr{
+					Data: &js_ast.EDot{
+						Target: js_ast.Expr{
+							Data: &js_ast.EIdentifier{
+								Ref: newDefaultNameRef,
+							},
+						},
+						Name: "default",
+					},
+				}
+				defaultNameRef = newDefaultNameRef
+			}
+
+			value := js_ast.Expr{Data: expr}
+
+			if !isESM {
+				value = js_ast.Expr{
+					Data: &js_ast.EIf{
+						Test: js_ast.Expr{
+							Data: &js_ast.EDot{
+								Target: js_ast.Expr{
+									Data: expr,
+								},
+								Name: "__esModule",
+							},
+						},
+						Yes: js_ast.Expr{
+							Data: &js_ast.EDot{
+								Target: js_ast.Expr{
+									Data: expr,
+								},
+								Name: "default",
+							},
+						},
+						No: js_ast.Expr{
+							Data: expr,
+						},
+					},
+				}
+			}
+
 			headStmts = append(headStmts, js_ast.Stmt{
 				Data: &js_ast.SLocal{
 					Decls: []js_ast.Decl{
 						{
 							Binding: js_ast.Binding{
 								Data: &js_ast.BIdentifier{
-									Ref: name,
+									Ref: defaultNameRef,
 								},
 							},
-							ValueOrNil: js_ast.Expr{
-								Data: &js_ast.EIf{
-									Test: js_ast.Expr{
-										Data: &js_ast.EDot{
-											Target: js_ast.Expr{
-												Data: expr,
-											},
-											Name: "__esModule",
-										},
-									},
-									Yes: js_ast.Expr{
-										Data: &js_ast.EDot{
-											Target: js_ast.Expr{
-												Data: expr,
-											},
-											Name: "default",
-										},
-									},
-									No: js_ast.Expr{
-										Data: expr,
-									},
-								},
-							},
+							// ValueOrNil: generateCommonRequireExpr(expr),
+							ValueOrNil: value,
 						},
 					},
 				},
 			})
 		}
 		if importStmt.Items != nil {
-			obj := js_ast.BObject{
-				Properties:   []js_ast.PropertyBinding{},
-				IsSingleLine: true,
+			expr := &js_ast.ERequireString{
+				ImportRecordIndex: importStmt.ImportRecordIndex,
 			}
-			for _, item := range *s.Data.(*js_ast.SImport).Items {
-				bindingName := item.OriginalName
-				if len(item.Alias) != 0 {
-					bindingName = item.Alias
+			addImportRecordIndex(&expr.ImportRecordIndex)
+			if isESM {
+				var importModName string = "_ESPACK_MODULE_" + randHash(3)
+				importModRef := generateNewSymbol(g, AST, js_ast.SymbolConst, importModName)
+				// 解决循环引用模块问题
+				for _, item := range *s.Data.(*js_ast.SImport).Items {
+					renameIdentifierExportCache[item.Name.Ref] = js_ast.Expr{
+						Data: &js_ast.EDot{
+							Target: js_ast.Expr{
+								Data: &js_ast.EIdentifier{
+									Ref: importModRef,
+								},
+							},
+							Name: item.Alias,
+						},
+					}
 				}
-				obj.Properties = append(obj.Properties, js_ast.PropertyBinding{
-					Key: js_ast.Expr{
-						Data: &js_ast.EString{
-							Value: helpers.StringToUTF16(bindingName),
+
+				headStmts = append(headStmts, js_ast.Stmt{
+					Data: &js_ast.SLocal{
+						Decls: []js_ast.Decl{
+							{
+								Binding: js_ast.Binding{
+									Data: &js_ast.BIdentifier{
+										Ref: importModRef,
+									},
+								},
+								ValueOrNil: js_ast.Expr{
+									Data: expr,
+								},
+							},
 						},
 					},
-					Value: js_ast.Binding{
-						Data: &js_ast.BIdentifier{
-							Ref: item.Name.Ref,
+				})
+			} else {
+				obj := js_ast.BObject{
+					Properties:   []js_ast.PropertyBinding{},
+					IsSingleLine: true,
+				}
+				for _, item := range *s.Data.(*js_ast.SImport).Items {
+					bindingName := item.OriginalName
+					if len(item.Alias) != 0 {
+						bindingName = item.Alias
+					}
+					obj.Properties = append(obj.Properties, js_ast.PropertyBinding{
+						Key: js_ast.Expr{
+							Data: &js_ast.EString{
+								Value: helpers.StringToUTF16(bindingName),
+							},
+						},
+						Value: js_ast.Binding{
+							Data: &js_ast.BIdentifier{
+								Ref: item.Name.Ref,
+							},
+						},
+					})
+				}
+
+				headStmts = append(headStmts, js_ast.Stmt{
+					Data: &js_ast.SLocal{
+						Decls: []js_ast.Decl{
+							{
+								Binding: js_ast.Binding{
+									Data: &obj,
+								},
+								ValueOrNil: js_ast.Expr{
+									Data: expr,
+								},
+							},
 						},
 					},
 				})
 			}
-			expr := &js_ast.ERequireString{
-				ImportRecordIndex: s.Data.(*js_ast.SImport).ImportRecordIndex,
-			}
-			addImportRecordIndex(&expr.ImportRecordIndex)
-			headStmts = append(headStmts, js_ast.Stmt{
-				Data: &js_ast.SLocal{
-					Decls: []js_ast.Decl{
-						{
-							Binding: js_ast.Binding{
-								Data: &obj,
-							},
-							ValueOrNil: js_ast.Expr{
-								Data: expr,
-							},
-						},
-					},
-				},
-			})
 		}
+
 		// import "mod"
 		// export * as alias from 'mod'
 		// SourceIndex 是应该不可能为0的，0是运行时代码
 		if importStmt.DefaultName == nil && importStmt.Items == nil && importStmt.NamespaceRef.SourceIndex != 0 {
 			symbol := g.Symbols.Get(importStmt.NamespaceRef)
-			shouldRemoveNextExportStmt = true
 			expr := &js_ast.ERequireString{
 				ImportRecordIndex: importStmt.ImportRecordIndex,
 			}
@@ -874,6 +977,22 @@ func transformImportStmt(g *graph.LinkerGraph, AST *js_ast.AST, s *js_ast.Stmt) 
 					},
 				})
 			} else {
+				headStmts = append(headStmts, js_ast.Stmt{
+					Data: &js_ast.SLocal{
+						Decls: []js_ast.Decl{
+							{
+								Binding: js_ast.Binding{
+									Data: &js_ast.BIdentifier{
+										Ref: importStmt.NamespaceRef,
+									},
+								},
+								ValueOrNil: js_ast.Expr{
+									Data: expr,
+								},
+							},
+						},
+					},
+				})
 				tailStmts = append(tailStmts, js_ast.Stmt{
 					Data: generateExportStmt(AST.ExportsRef, symbol.OriginalName, &js_ast.Expr{
 						Data: expr,
@@ -894,8 +1013,17 @@ func transformImportStmt(g *graph.LinkerGraph, AST *js_ast.AST, s *js_ast.Stmt) 
 				},
 			})
 		}
-		// s.Data = &js_ast.SEmpty{}
+
 		s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
+	}
+}
+
+func transformRenameExpr(g *graph.LinkerGraph, AST *js_ast.AST, e *js_ast.Expr) {
+	switch expr := e.Data.(type) {
+	case *js_ast.EImportIdentifier:
+		if defaultExpr, ok := renameIdentifierExportCache[expr.Ref]; ok {
+			e.Data = defaultExpr.Data
+		}
 	}
 }
 
@@ -921,7 +1049,7 @@ func transformImportExpr(g *graph.LinkerGraph, AST *js_ast.AST, e *js_ast.Expr) 
 	// import('mod')
 	case *js_ast.EDot:
 		if _, ok := e.Data.(*js_ast.EDot).Target.Data.(*js_ast.EImportString); ok {
-			isESModule = true
+			AST.ExportsKind = js_ast.ExportsESMWithDynamicFallback
 			// 这里不需要更新importRecordIndex，交给上面的ERequireResolveString处理
 			e.Data.(*js_ast.EDot).Target.Data = &js_ast.ERequireResolveString{
 				ImportRecordIndex: e.Data.(*js_ast.EDot).Target.Data.(*js_ast.EImportString).ImportRecordIndex,
@@ -987,19 +1115,80 @@ func generateAssignToExport(g *graph.LinkerGraph, AST *js_ast.AST, exprs ...js_a
 	}
 }
 
+func rewriteImportRecord(g *graph.LinkerGraph, AST *js_ast.AST, index *uint32) {
+	importRecord := &AST.ImportRecords[*index]
+	importRecord.Kind = ast.PackRequire
+	importRecord.Path = g.Files[importRecord.SourceIndex.GetIndex()].InputFile.Source.KeyPath
+	importRecordIndexSlice = append(importRecordIndexSlice, index)
+	originImportRecordIndex = append(originImportRecordIndex, *index)
+}
+
 func transformExportStmt(g *graph.LinkerGraph, AST *js_ast.AST, s *js_ast.Stmt) {
+
 	switch s.Data.(type) {
+	// export { xxx } from "xxx"
+	case *js_ast.SExportFrom:
+		// isESModule = true
+		exportFrom := s.Data.(*js_ast.SExportFrom)
+		s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
+		for _, item := range exportFrom.Items {
+			require := &js_ast.ERequireString{
+				ImportRecordIndex: exportFrom.ImportRecordIndex,
+			}
+			rewriteImportRecord(g, AST, &require.ImportRecordIndex)
+			tailStmts = append(tailStmts, js_ast.Stmt{
+				Data: generateExportStmt(AST.ExportsRef, item.Alias, &js_ast.Expr{
+					Loc: s.Loc,
+					Data: &js_ast.EDot{
+						Target: js_ast.Expr{
+							Data: require,
+							Loc:  s.Loc,
+						},
+						Name: item.OriginalName,
+					},
+				}),
+				Loc: s.Loc,
+			})
+
+		}
+
 	// export default xx
 	case *js_ast.SExportDefault:
-		isESModule = true
-		tailStmts = append(tailStmts, js_ast.Stmt{
-			Data: generateExportStmt(AST.ExportsRef, "default", &s.Data.(*js_ast.SExportDefault).Value.Data.(*js_ast.SExpr).Value),
-		})
-		s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
+		// isESModule = true
+		exportDefault := &s.Data.(*js_ast.SExportDefault).Value
+		switch exportDefault.Data.(type) {
+		case *js_ast.SExpr:
+			tailStmts = append(tailStmts, js_ast.Stmt{
+				Data: generateExportStmt(AST.ExportsRef, "default", &exportDefault.Data.(*js_ast.SExpr).Value),
+				Loc:  s.Loc,
+			})
+			s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
+		case *js_ast.SFunction:
+			if exportDefault.Data.(*js_ast.SFunction).Fn.Name != nil {
+				s.Data = exportDefault.Data
+				tailStmts = append(tailStmts, js_ast.Stmt{
+					Data: generateExportStmt(AST.ExportsRef, "default", &js_ast.Expr{
+						Loc: s.Loc,
+						Data: &js_ast.EIdentifier{
+							Ref: exportDefault.Data.(*js_ast.SFunction).Fn.Name.Ref,
+						},
+					}),
+				})
+			} else {
+				tailStmts = append(tailStmts, js_ast.Stmt{
+					Data: generateExportStmt(AST.ExportsRef, "default", &js_ast.Expr{
+						Loc:  s.Loc,
+						Data: &js_ast.EFunction{Fn: exportDefault.Data.(*js_ast.SFunction).Fn},
+					}),
+				})
+				s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
+			}
+		}
+
 	// export const x = 123
 	case *js_ast.SLocal:
 		if s.Data.(*js_ast.SLocal).IsExport {
-			isESModule = true
+			// isESModule = true
 			decl := s.Data.(*js_ast.SLocal).Decls[0]
 			ref := decl.Binding.Data.(*js_ast.BIdentifier).Ref
 			symbol := g.Symbols.Get(ref)
@@ -1010,12 +1199,13 @@ func transformExportStmt(g *graph.LinkerGraph, AST *js_ast.AST, s *js_ast.Stmt) 
 						Ref: ref,
 					},
 				}),
+				Loc: s.Loc,
 			})
 		}
 	// export function x() {}
 	case *js_ast.SFunction:
 		if s.Data.(*js_ast.SFunction).IsExport {
-			isESModule = true
+			// isESModule = true
 			ref := s.Data.(*js_ast.SFunction).Fn.Name.Ref
 			symbol := g.Symbols.Get(ref)
 			s.Data.(*js_ast.SFunction).IsExport = false
@@ -1024,33 +1214,32 @@ func transformExportStmt(g *graph.LinkerGraph, AST *js_ast.AST, s *js_ast.Stmt) 
 					Data: &js_ast.EIdentifier{
 						Ref: ref,
 					},
+					Loc: s.Loc,
 				},
 				),
 			})
 		}
 	// export { x: 123 }
 	case *js_ast.SExportClause:
-		isESModule = true
-		if shouldRemoveNextExportStmt {
-			s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
-			shouldRemoveNextExportStmt = false
-			break
-		}
 		properties := []js_ast.Property{}
 		for _, item := range s.Data.(*js_ast.SExportClause).Items {
 			name := item.OriginalName
 			if item.Alias != "" {
 				name = item.Alias
 			}
+			expr := js_ast.Expr{
+				Data: &js_ast.EIdentifier{
+					Ref: item.Name.Ref,
+				},
+			}
+			if e, ok := renameIdentifierExportCache[item.Name.Ref]; ok {
+				expr = e
+			}
 			properties = append(properties, js_ast.Property{
 				Key: js_ast.Expr{
 					Data: &js_ast.EString{Value: helpers.StringToUTF16(name)},
 				},
-				ValueOrNil: js_ast.Expr{
-					Data: &js_ast.EIdentifier{
-						Ref: item.Name.Ref,
-					},
-				},
+				ValueOrNil: expr,
 			})
 		}
 		tailStmts = append(tailStmts, js_ast.Stmt{
@@ -1059,22 +1248,20 @@ func transformExportStmt(g *graph.LinkerGraph, AST *js_ast.AST, s *js_ast.Stmt) 
 					Properties: properties,
 				}}),
 			},
+			Loc: s.Loc,
 		})
 		s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
 	case *js_ast.SExportStar:
-		isESModule = true
+		AST.ExportsKind = js_ast.ExportsESMWithDynamicFallback
+		// isESModule = true
 		index := &s.Data.(*js_ast.SExportStar).ImportRecordIndex
-		importRecord := &AST.ImportRecords[*index]
-		importRecord.Kind = ast.PackRequire
-		importRecord.Path = g.Files[importRecord.SourceIndex.GetIndex()].InputFile.Source.KeyPath
-		importRecordIndexSlice = append(importRecordIndexSlice, index)
-		originImportRecordIndex = append(originImportRecordIndex, *index)
+		rewriteImportRecord(g, AST, index)
 
 		expr := &js_ast.ERequireString{
 			ImportRecordIndex: *index,
 		}
 		addImportRecordIndex(&expr.ImportRecordIndex)
-		// export * as from 'mod'
+		// export * as xxx from 'mod'
 		if s.Data.(*js_ast.SExportStar).Alias != nil {
 			tailStmts = append(tailStmts, js_ast.Stmt{
 				Data: generateExportStmt(AST.ExportsRef, s.Data.(*js_ast.SExportStar).Alias.OriginalName, &js_ast.Expr{
@@ -1084,7 +1271,6 @@ func transformExportStmt(g *graph.LinkerGraph, AST *js_ast.AST, s *js_ast.Stmt) 
 			})
 			// export * form 'mod'
 		} else {
-
 			tailStmts = append(tailStmts, js_ast.Stmt{
 				Data: &js_ast.SExpr{
 					Value: generateAssignToExport(g, AST, js_ast.Expr{Data: expr}),
@@ -1189,7 +1375,7 @@ func generateHotCode(log logger.Log, g *graph.LinkerGraph, chunkId string, newPa
 				ValueOrNil: value,
 			})
 		}
-		g.Symbols.SymbolsForSource[hotCodeAST.ExportsRef.SourceIndex] = hotCodeAST.Symbols
+		g.Symbols.SymbolsForSource[hotCodeAST.ModuleRef.SourceIndex] = hotCodeAST.Symbols
 		return hotCodeAST
 	}
 	return nil
@@ -1205,6 +1391,9 @@ func printJS(ast *js_ast.AST, g *graph.LinkerGraph) js_printer.PrintResult {
 	})
 }
 
+// TODO
+// 1. 开启tree shaking会有export问题，因为shaking过程中移除了语句
+// 2. 不开启bundle/write，打包也会有问题
 func PackLink(
 	options *config.Options,
 	timer *helpers.Timer,
@@ -1217,7 +1406,7 @@ func PackLink(
 	reachableFiles []uint32,
 	dataForSourceMaps func() []bundler.DataForSourceMap,
 ) (results []graph.OutputFile) {
-
+	start := time.Now().UnixMilli()
 	// clone的时候会把语法树上的symbols设为nil
 	g := graph.CloneLinkerGraph(
 		inputFiles,
@@ -1233,7 +1422,7 @@ func PackLink(
 		C: map[string]bool{},
 	}
 
-	// 并行生成chunk
+	// TODO 并行生成chunk
 	for _, entryPoint := range entryPoints {
 		chunkId := inputFiles[entryPoint.SourceIndex].Source.IdentifierName
 
@@ -1245,7 +1434,6 @@ func PackLink(
 		g.Symbols.SymbolsForSource[runtimeSource.Index] = packCodeAST.Symbols
 		ast := generateEntryChunk(log, &g, chunkId, &packCodeAST, entryPoint)
 		result := printJS(ast, &g)
-
 		if currentHash != "" {
 			// 生成hot code
 			hotCode := generateHotCode(log, &g, chunkId, newChunkPackModules[chunkId], chunkPackModules[chunkId])
@@ -1290,6 +1478,7 @@ func PackLink(
 	})
 	// 更新hash
 	currentHash = manifest.H
-	println("current hash:", currentHash)
+	fmt.Println("pack link consume", (time.Now().UnixMilli() - start), "ms")
+	fmt.Println("current hash:", currentHash)
 	return results
 }

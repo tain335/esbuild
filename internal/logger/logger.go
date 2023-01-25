@@ -346,6 +346,14 @@ type Source struct {
 	Index uint32
 }
 
+func (s *Source) Equal(other *Source) bool {
+	// spew.Dump(s, other)
+	return s.Contents == other.Contents &&
+		s.IdentifierName == other.IdentifierName &&
+		s.Index == other.Index &&
+		s.KeyPath == other.KeyPath && s.PrettyPath == other.PrettyPath
+}
+
 func (s *Source) TextForRange(r Range) string {
 	return s.Contents[r.Loc.Start : r.Loc.Start+r.Len]
 }

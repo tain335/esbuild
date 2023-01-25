@@ -190,7 +190,6 @@ func parseFile(args parseArgs) {
 			args.results <- result
 		}
 	}()
-
 	switch loader {
 	case config.LoaderJS, config.LoaderEmpty:
 		ast, ok := args.caches.JSCache.Parse(args.log, source, js_parser.OptionsFromConfig(&args.options))
@@ -1199,9 +1198,13 @@ func ScanBundle(
 
 	s.preprocessInjectedFiles()
 	entryPointMeta := s.addEntryPoints(entryPoints)
-	s.scanAllDependencies()
-	files := s.processScannedFiles(entryPointMeta)
 
+	// 为什么在Watch模式下scanAllDependencies仍然耗时？
+	// 主要是因为每次都从entry遍历所有文件然后对文件里对引用的路径都进行resolve,
+	// 没有利用好watchData
+	s.scanAllDependencies()
+
+	files := s.processScannedFiles(entryPointMeta)
 	return Bundle{
 		fs:              fs,
 		res:             s.res,
@@ -2485,6 +2488,7 @@ func (b *Bundle) Compile(log logger.Log, timer *helpers.Timer, mangleCache map[s
 		}
 		outputFiles = outputFiles[:end]
 	}
+
 	return outputFiles, metafileJSON
 }
 

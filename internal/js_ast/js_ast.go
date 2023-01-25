@@ -1730,9 +1730,9 @@ type SymbolMap struct {
 	// single inner array, so you can join the maps together by just make a
 	// single outer array containing all of the inner arrays. See the comment on
 	// "Ref" for more detail.
-	// SymbolsForSource [][]Symbol
 	AccessLock       sync.Mutex
 	SymbolsForSource map[uint32][]Symbol
+	MaxSourceIndex   uint32
 	// SymbolsForSource [][]Symbol
 }
 

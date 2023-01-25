@@ -2,9 +2,11 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"path"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -86,6 +88,12 @@ func socketHandler(w http.ResponseWriter, r *http.Request) {
 func resourceHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
 		if content, ok := fileCache[path.Base(r.URL.Path)]; ok {
+			if strings.HasSuffix(r.URL.Path, ".js") {
+				w.Header().Set("Content-Type", "text/javascript")
+			} else if strings.HasSuffix(r.URL.Path, ".css") {
+
+				w.Header().Set("Content-Type", "text/css")
+			}
 			w.WriteHeader(http.StatusOK)
 			w.Write(content)
 		} else {
@@ -97,7 +105,6 @@ func resourceHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func onBuild(br BuildResult) {
-
 	if len(br.Errors) > 0 {
 		errorMessage := ""
 		for _, error := range br.Errors {
@@ -133,19 +140,21 @@ func runBuilder(ctx *internalContext) error {
 	ctx.watcher = &watcher{
 		fs: ctx.realFS,
 		rebuild: func() fs.WatchData {
+			start := time.Now().UnixMilli()
 			state := ctx.rebuild()
 			onBuild(state.result)
+			fmt.Println("rebuild consume: ", time.Now().UnixMilli()-start, "ms")
 			return state.watchData
 		},
 	}
 	// 必须开启watch mode
 	ctx.args.options.WatchMode = true
 	ctx.mutex.Unlock()
-
+	start := time.Now().UnixMilli()
 	ctx.watcher.start(ctx.args.logOptions.LogLevel, ctx.args.logOptions.Color)
 	buildResult := ctx.rebuild().result
 	onBuild(buildResult)
-
+	fmt.Println("first build consume: ", time.Now().UnixMilli()-start, "ms")
 	return nil
 }
 

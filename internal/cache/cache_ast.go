@@ -157,6 +157,9 @@ func (c *JSCache) Parse(log logger.Log, source logger.Source, options js_parser.
 		return c.entries[source.KeyPath]
 	}()
 
+	// Watch模式下仍然出现很多cache miss？
+	// 主要是因为遍历解析文件是并行的，不是按照顺序解析，当出现有不同模块依赖相同版本的模块A，但是这个模块A实际
+	// 的位置是不一样的
 	// Cache hit
 	if entry != nil && entry.source == source && entry.options.Equal(&options) {
 		for _, msg := range entry.msgs {

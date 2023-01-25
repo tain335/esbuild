@@ -409,7 +409,7 @@ type NumberRenamer struct {
 func NewNumberRenamer(symbols js_ast.SymbolMap, reservedNames map[string]uint32) *NumberRenamer {
 	return &NumberRenamer{
 		symbols: symbols,
-		names:   make([][]string, len(symbols.SymbolsForSource)),
+		names:   make([][]string, symbols.MaxSourceIndex+1),
 		root:    numberScope{nameCounts: reservedNames},
 	}
 }

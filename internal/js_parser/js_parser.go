@@ -482,6 +482,16 @@ func OptionsFromConfig(options *config.Options) Options {
 func (a *Options) Equal(b *Options) bool {
 	// Compare "optionsThatSupportStructuralEquality"
 	if a.optionsThatSupportStructuralEquality != b.optionsThatSupportStructuralEquality {
+		// 确定是否因为moduleTypeData.Source导致不相等
+		clone := a.optionsThatSupportStructuralEquality
+		clone.moduleTypeData = b.optionsThatSupportStructuralEquality.moduleTypeData
+		if clone == b.optionsThatSupportStructuralEquality {
+			clone := a.optionsThatSupportStructuralEquality.moduleTypeData
+			clone.Source = b.optionsThatSupportStructuralEquality.moduleTypeData.Source
+			if clone == b.optionsThatSupportStructuralEquality.moduleTypeData {
+				return a.optionsThatSupportStructuralEquality.moduleTypeData.Source.Equal(b.optionsThatSupportStructuralEquality.moduleTypeData.Source)
+			}
+		}
 		return false
 	}
 
@@ -520,6 +530,7 @@ func (a *Options) Equal(b *Options) bool {
 
 	// Compare "JSX"
 	if a.jsx.Parse != b.jsx.Parse || !jsxExprsEqual(a.jsx.Factory, b.jsx.Factory) || !jsxExprsEqual(a.jsx.Fragment, b.jsx.Fragment) {
+		fmt.Println("JSX")
 		return false
 	}
 
@@ -7865,7 +7876,6 @@ func (p *parser) visitStmts(stmts []js_ast.Stmt, kind stmtsKind) []js_ast.Stmt {
 		}
 		visited = p.visitAndAppendStmt(visited, stmt)
 	}
-
 	// This is used for temporary variables that could be captured in a closure,
 	// and therefore need to be generated inside the nearest enclosing block in
 	// case they are generated inside a loop.
@@ -7934,10 +7944,23 @@ func (p *parser) visitStmts(stmts []js_ast.Stmt, kind stmtsKind) []js_ast.Stmt {
 
 		// Reuse memory from "before"
 		before = before[:0]
-		kind := js_ast.LocalLet
-		if p.options.unsupportedJSFeatures.Has(compat.ConstAndLet) {
-			kind = js_ast.LocalVar
-		}
+
+		// maybe a bug
+		// when code is
+		// (function() {
+		//   try {
+		//     function d() {}
+		//   } catch (e) {
+		//     console.log(e)
+		//   }
+		// })()
+		kind := js_ast.LocalVar
+
+		// kind := js_ast.LocalLet
+		// if p.options.unsupportedJSFeatures.Has(compat.ConstAndLet) {
+		// 	kind = js_ast.LocalVar
+		// }
+
 		if len(letDecls) > 0 {
 			before = append(before, js_ast.Stmt{Loc: letDecls[0].ValueOrNil.Loc, Data: &js_ast.SLocal{Kind: kind, Decls: letDecls}})
 		}
@@ -7983,7 +8006,6 @@ func (p *parser) visitStmts(stmts []js_ast.Stmt, kind stmtsKind) []js_ast.Stmt {
 					continue
 				}
 			}
-
 			visited[end] = stmt
 			end++
 		}
@@ -9243,11 +9265,15 @@ func (p *parser) keepStmtSymbolName(loc logger.Loc, ref js_ast.Ref, name string)
 	}}
 }
 
+var flag = false
+
 func (p *parser) visitAndAppendStmt(stmts []js_ast.Stmt, stmt js_ast.Stmt) []js_ast.Stmt {
 	// By default any statement ends the const local prefix
 	wasAfterAfterConstLocalPrefix := p.currentScope.IsAfterConstLocalPrefix
 	p.currentScope.IsAfterConstLocalPrefix = true
-
+	if flag {
+		flag = p.source.Index == 2
+	}
 	switch s := stmt.Data.(type) {
 	case *js_ast.SEmpty, *js_ast.SComment:
 		// Comments do not end the const local prefix
@@ -9891,7 +9917,9 @@ func (p *parser) visitAndAppendStmt(stmts []js_ast.Stmt, stmt js_ast.Stmt) []js_
 			}
 		}
 		p.fnOrArrowDataVisit.tryBodyCount++
+
 		s.Block.Stmts = p.visitStmts(s.Block.Stmts, stmtsNormal)
+
 		p.fnOrArrowDataVisit.tryBodyCount--
 		p.popScope()
 
@@ -9996,6 +10024,7 @@ func (p *parser) visitAndAppendStmt(stmts []js_ast.Stmt, stmt js_ast.Stmt) []js_
 		if p.options.keepNames {
 			stmts = append(stmts, p.keepStmtSymbolName(s.Fn.Name.Loc, s.Fn.Name.Ref, p.symbols[s.Fn.Name.Ref.InnerIndex].OriginalName))
 		}
+
 		return stmts
 
 	case *js_ast.SClass:
@@ -15280,6 +15309,7 @@ func Parse(log logger.Log, source logger.Source, options Options) (result js_ast
 		isModuleScope:          true,
 		allowDirectivePrologue: true,
 	})
+
 	p.prepareForVisitPass()
 
 	// Insert a "use strict" directive if "alwaysStrict" is active
@@ -15344,7 +15374,6 @@ func Parse(log logger.Log, source logger.Source, options Options) (result js_ast
 		}
 		before = p.generateImportStmt(file.Source.KeyPath.Text, exportsNoConflict, &file.Source.Index, before, symbols)
 	}
-
 	// Bind symbols in a second pass over the AST. I started off doing this in a
 	// single pass, but it turns out it's pretty much impossible to do this
 	// correctly while handling arrow functions because of the grammar
@@ -16020,7 +16049,6 @@ func (p *parser) toAST(before, parts, after []js_ast.Part, hashbang string, dire
 			}
 		}
 	}
-
 	return js_ast.AST{
 		Parts:                           parts,
 		ModuleTypeData:                  p.options.moduleTypeData,

@@ -30,7 +30,7 @@ func Template(log logger.Log, sourceIndex uint32, template string, data map[stri
 		Contents:       template,
 	}, options)
 	js_ast.TraverseAST(ast.Parts, &js_ast.ASTVisitor{
-		VisitStmt: func(s *js_ast.Stmt, nodePath *js_ast.NodePath, iterator *js_ast.StmtIterator) {
+		EnterStmt: func(s *js_ast.Stmt, nodePath *js_ast.NodePath, iterator *js_ast.StmtIterator) {
 			switch s.Data.(type) {
 			case *js_ast.SExpr:
 				if expr, ok := s.Data.(*js_ast.SExpr).Value.Data.(*js_ast.EIdentifier); ok {
@@ -44,7 +44,7 @@ func Template(log logger.Log, sourceIndex uint32, template string, data map[stri
 				}
 			}
 		},
-		VisitExpr: func(e *js_ast.Expr, nodePath *js_ast.NodePath) {
+		EnterExpr: func(e *js_ast.Expr, nodePath *js_ast.NodePath) {
 			switch e.Data.(type) {
 			case *js_ast.EIdentifier:
 				name := ast.Symbols[e.Data.(*js_ast.EIdentifier).Ref.InnerIndex].OriginalName

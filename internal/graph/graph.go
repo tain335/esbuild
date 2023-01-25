@@ -131,7 +131,7 @@ func CloneLinkerGraph(
 ) LinkerGraph {
 	entryPoints := append([]EntryPoint{}, originalEntryPoints...)
 	symbols := js_ast.NewSymbolMap()
-	// symbols := js_ast.NewSymbolMap(len(inputFiles))
+
 	files := make([]LinkerFile, len(inputFiles))
 
 	// Mark all entry points so we don't add them again for import() expressions
@@ -167,6 +167,9 @@ func CloneLinkerGraph(
 				// Clone the symbol map
 				fileSymbols := append([]js_ast.Symbol{}, repr.AST.Symbols...)
 				symbols.AccessLock.Lock()
+				if sourceIndex > symbols.MaxSourceIndex {
+					symbols.MaxSourceIndex = sourceIndex
+				}
 				symbols.SymbolsForSource[sourceIndex] = fileSymbols
 				symbols.AccessLock.Unlock()
 				repr.AST.Symbols = nil
