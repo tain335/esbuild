@@ -526,3 +526,7 @@ func (fs *realFS) WatchData() WatchData {
 		Paths: paths,
 	}
 }
+
+func (fs *realFS) ClearPath(path string) {
+	delete(fs.watchData, path)
+}

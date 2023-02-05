@@ -988,6 +988,30 @@ func (ctx *internalContext) rebuild() rebuildState {
 	return build.state
 }
 
+func (ctx *internalContext) incrementalBuild(dirtyPath string) rebuildState {
+	ctx.mutex.Lock()
+	defer ctx.mutex.Unlock()
+
+	// Ignore disposed contexts
+	if ctx.didDispose {
+		return rebuildState{}
+	}
+
+	var args incrementalBuildArgs = incrementalBuildArgs{
+		caches:         ctx.args.caches,
+		onEndCallbacks: ctx.args.onEndCallbacks,
+		logOptions:     ctx.args.logOptions,
+		entryPoints:    ctx.args.entryPoints,
+		options:        ctx.args.options,
+		mangleCache:    ctx.args.mangleCache,
+		dirtyPath:      dirtyPath,
+		dev:            true,
+	}
+
+	return incrementalBuildImpl(args)
+
+}
+
 // This is used by the dev server. The dev server does a rebuild on each
 // incoming request since a) we want incoming requests to always be up to
 // date and b) we don't necessarily know what output paths to even serve
@@ -1565,6 +1589,52 @@ func rebuildImpl(args rebuildArgs, oldSummary buildSummary) rebuildState {
 		summary:   newSummary,
 		options:   args.options,
 		watchData: watchData,
+	}
+}
+
+type incrementalBuildArgs struct {
+	caches         *cache.CacheSet
+	onEndCallbacks []onEndCallback
+	logOptions     logger.OutputOptions
+	entryPoints    []bundler.EntryPoint
+	options        config.Options
+	mangleCache    map[string]interface{}
+	dirtyPath      string
+	dev            bool
+}
+
+func incrementalBuildImpl(args incrementalBuildArgs) rebuildState {
+	log := logger.NewStderrLog(args.logOptions)
+	bundle, watchData := bundler.IncrementalBuildBundle(args.dirtyPath)
+
+	var timer *helpers.Timer
+	if api_helpers.UseTimer {
+		timer = &helpers.Timer{}
+	}
+
+	var result BuildResult
+	result.MangleCache = cloneMangleCache(log, args.mangleCache)
+
+	link := packlinker.PackLink
+
+	results, metafile := bundle.Compile(log, timer, result.MangleCache, link)
+
+	result.Metafile = metafile
+
+	// Populate the results to return
+	result.OutputFiles = make([]OutputFile, len(results))
+	for i, item := range results {
+		if args.options.WriteToStdout {
+			item.AbsPath = "<stdout>"
+		}
+		result.OutputFiles[i] = OutputFile{
+			Path:     item.AbsPath,
+			Contents: item.Contents,
+		}
+	}
+	return rebuildState{
+		watchData: watchData,
+		result:    result,
 	}
 }
 

@@ -1062,6 +1062,7 @@ type scanner struct {
 	// valid. Make sure to check the "ok" flag before using them.
 	results       []parseResult
 	visited       map[logger.Path]visitedFile
+	parseArgsMap  map[logger.Path]parseArgs
 	resultChannel chan parseResult
 
 	options config.Options
@@ -1090,6 +1091,9 @@ func generateUniqueKeyPrefix() (string, error) {
 	// This is 16 bytes and shouldn't generate escape characters when put into strings
 	return base64.URLEncoding.EncodeToString(data[:]), nil
 }
+
+var lastBundle *Bundle
+var lastScanner *scanner
 
 // This creates a bundle by scanning over the whole module graph starting from
 // the entry points until all modules are reached. Each module has some number
@@ -1138,6 +1142,7 @@ func ScanBundle(
 		timer:           timer,
 		results:         make([]parseResult, 0, caches.SourceIndexCache.LenHint()),
 		visited:         make(map[logger.Path]visitedFile),
+		parseArgsMap:    make(map[logger.Path]parseArgs),
 		resultChannel:   make(chan parseResult),
 		uniqueKeyPrefix: uniqueKeyPrefix,
 	}
@@ -1202,10 +1207,12 @@ func ScanBundle(
 	// 为什么在Watch模式下scanAllDependencies仍然耗时？
 	// 主要是因为每次都从entry遍历所有文件然后对文件里对引用的路径都进行resolve,
 	// 没有利用好watchData
+	start := time.Now().UnixMilli()
 	s.scanAllDependencies()
+	fmt.Println("scanAllDependencies: ", time.Now().UnixMilli()-start, "ms")
 
 	files := s.processScannedFiles(entryPointMeta)
-	return Bundle{
+	bundle := Bundle{
 		fs:              fs,
 		res:             s.res,
 		files:           files,
@@ -1213,6 +1220,39 @@ func ScanBundle(
 		uniqueKeyPrefix: uniqueKeyPrefix,
 		options:         s.options,
 	}
+	lastBundle = &bundle
+	lastScanner = &s
+	return bundle
+}
+
+func IncrementalBuildBundle(path string) (Bundle, fs.WatchData) {
+	var sourceIndex uint32
+	var lp logger.Path
+	for _, f := range lastScanner.results {
+		if f.file.inputFile.Source.KeyPath.Text == path {
+			sourceIndex = f.file.inputFile.Source.Index
+			lp = f.file.inputFile.Source.KeyPath
+			break
+		}
+	}
+	if sourceIndex != 0 {
+		lastBundle.fs.ClearPath(path)
+		lastScanner.remaining++
+		go parseFile(lastScanner.parseArgsMap[lp])
+		lastScanner.scanAllDependencies()
+		files := lastScanner.processScannedFiles(lastBundle.entryPoints)
+		bundle := Bundle{
+			fs:              lastBundle.fs,
+			res:             lastScanner.res,
+			files:           files,
+			entryPoints:     lastBundle.entryPoints,
+			uniqueKeyPrefix: lastBundle.uniqueKeyPrefix,
+			options:         lastScanner.options,
+		}
+		lastBundle = &bundle
+		return bundle, bundle.fs.WatchData()
+	}
+	return *lastBundle, lastBundle.fs.WatchData()
 }
 
 type inputKind uint8
@@ -1332,8 +1372,7 @@ func (s *scanner) maybeParseFile(
 		sideEffects.Kind = graph.NoSideEffects_PackageJSON
 		sideEffects.Data = resolveResult.PrimarySideEffectsData
 	}
-
-	go parseFile(parseArgs{
+	s.parseArgsMap[path] = parseArgs{
 		fs:              s.fs,
 		log:             s.log,
 		res:             s.res,
@@ -1350,7 +1389,26 @@ func (s *scanner) maybeParseFile(
 		inject:          inject,
 		skipResolve:     skipResolve,
 		uniqueKeyPrefix: s.uniqueKeyPrefix,
-	})
+	}
+	go parseFile(s.parseArgsMap[path])
+	// go parseFile(parseArgs{
+	// 	fs:              s.fs,
+	// 	log:             s.log,
+	// 	res:             s.res,
+	// 	caches:          s.caches,
+	// 	keyPath:         path,
+	// 	prettyPath:      prettyPath,
+	// 	sourceIndex:     visited.sourceIndex,
+	// 	importSource:    importSource,
+	// 	sideEffects:     sideEffects,
+	// 	importPathRange: importPathRange,
+	// 	pluginData:      pluginData,
+	// 	options:         optionsClone,
+	// 	results:         s.resultChannel,
+	// 	inject:          inject,
+	// 	skipResolve:     skipResolve,
+	// 	uniqueKeyPrefix: s.uniqueKeyPrefix,
+	// })
 
 	return visited.sourceIndex
 }

@@ -208,6 +208,8 @@ type FS interface {
 	// This is a set of all files used and all directories checked. The build
 	// must be invalidated if any of these watched files change.
 	WatchData() WatchData
+
+	ClearPath(path string)
 }
 
 type WatchData struct {

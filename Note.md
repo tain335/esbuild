@@ -263,10 +263,36 @@ graph.JSRepr的CSSSourceIndex会被设置
 ## 其他
 其他文件都是当成js里面的一个字符处理
 
-# ESPack改造
-增加webpack运行时 // 模仿原本runtime 添加一个webpack_rutime模块
-增加hot-reload通知能力
+# 关于增量更新设计
 
-增加ast-tranform能力 // 这个看来是不需要的，因为已经把信息提取到
-增加css-loader处理逻辑
-增加react-hot-loader处理逻辑
+# ESPack改造
+Step 1
+1. 增加webpack运行时 // 模仿原本runtime 添加一个webpack_rutime模块 done
+2. 增加hot-reload通知能力 // done
+3. 增加ast-tranform能力 // 这个看来是不需要的，因为已经把信息提取到
+4. 增加css-loader处理逻辑 // done
+5. 增加react-hot-loader处理逻辑 // done 
+6. sass-loader // done
+目标：能够使用espack跑起项目 // done
+
+Step 2
+1. 重构js_ast遍历
+2. 优化增量更新逻辑，目标在200ms
+3. 使用fsnotify替换原本的watcher
+4. ejs插件
+5. source_map
+6. tree shaking效果对比
+7. stream link降低开发时内存消耗
+目标：能够使用espack开发项目
+
+Step 3
+1. 添加code-spliting算法模块，能够基于请求数或者文件大小来分块
+2. async chunk处理
+目标：能够使用espack进行打包
+
+Step 4
+1. 添加打包数据输出
+2. 新的数据分析页面
+目标：能够高效分析页面模块依赖关系
+
+

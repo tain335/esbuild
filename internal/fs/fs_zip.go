@@ -333,6 +333,10 @@ func (fs *zipFS) WatchData() WatchData {
 	return fs.inner.WatchData()
 }
 
+func (fs *zipFS) ClearPath(path string) {
+	fs.inner.ClearPath(path)
+}
+
 func ParseYarnPnPVirtualPath(path string) (string, string, bool) {
 	i := 0
 

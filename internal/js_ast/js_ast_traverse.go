@@ -89,11 +89,31 @@ func newStmtIterator(stmts *[]Stmt) StmtIterator {
 	}
 }
 
+func visitBinding(binding *Binding, visitor ASTVisitorInterface, parentPath *NodePath, iterator *StmtIterator) {
+	if binding == nil {
+		return
+	}
+	switch s := binding.Data.(type) {
+	case *BArray:
+		for index := range s.Items {
+			visitBinding(&s.Items[index].Binding, visitor, parentPath, iterator)
+			visitExpr(&s.Items[index].DefaultValueOrNil, visitor, parentPath, iterator)
+		}
+	case *BObject:
+		for index := range s.Properties {
+			visitExpr(&s.Properties[index].Key, visitor, parentPath, iterator)
+			visitBinding(&s.Properties[index].Value, visitor, parentPath, iterator)
+			visitExpr(&s.Properties[index].DefaultValueOrNil, visitor, parentPath, iterator)
+		}
+	}
+}
+
 func visitArgs(args []Arg, visitor ASTVisitorInterface, parentPath *NodePath, iterator *StmtIterator) {
 	for i := range args {
 		for j := range args[i].TSDecorators {
 			visitExpr(&args[i].TSDecorators[j], visitor, parentPath, iterator)
 		}
+		visitBinding(&args[i].Binding, visitor, parentPath, iterator)
 		visitExpr(&args[i].DefaultOrNil, visitor, parentPath, iterator)
 	}
 }
@@ -222,6 +242,7 @@ func visitStmt(stmt *Stmt, visitor ASTVisitorInterface, parentPath *NodePath, it
 	case *SLocal:
 		dels := stmt.Data.(*SLocal).Decls
 		for i := range dels {
+			visitBinding(&dels[i].Binding, visitor, stmtPath, iterator)
 			visitExpr(&dels[i].ValueOrNil, visitor, stmtPath, iterator)
 		}
 	case *SIf:

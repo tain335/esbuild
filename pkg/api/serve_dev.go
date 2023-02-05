@@ -23,7 +23,11 @@ type devApiHandler struct {
 	stop func()
 }
 
-var upgrader = websocket.Upgrader{}
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
 var timeout = 30 * time.Second
 
 var connectionsMutex = sync.Mutex{}
@@ -70,9 +74,8 @@ func serveClient(conn *websocket.Conn) {
 
 func socketHandler(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
-
 	if err != nil {
-		return
+		panic(err)
 	}
 
 	conn.SetCloseHandler(func(code int, text string) error {
@@ -97,7 +100,8 @@ func resourceHandler(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			w.Write(content)
 		} else {
-			w.WriteHeader(http.StatusNotFound)
+			w.WriteHeader(http.StatusOK)
+			w.Write(fileCache["index.html"])
 		}
 	} else {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -117,31 +121,38 @@ func onBuild(br BuildResult) {
 			Data: errorMessage,
 		})
 	} else {
-		hash := br.OutputFiles[len(br.OutputFiles)-1].Contents
+		if len(br.OutputFiles) == 0 {
+			panic(errors.New("no output files"))
+		} else {
+			hash := br.OutputFiles[len(br.OutputFiles)-1].Contents
 
-		for _, file := range br.OutputFiles {
-			println(file.Path, path.Base(file.Path))
-			fileCache[path.Base(file.Path)] = file.Contents
+			for _, file := range br.OutputFiles {
+				println(file.Path, path.Base(file.Path))
+				fileCache[path.Base(file.Path)] = file.Contents
+			}
+			sendMessageToAllConn(PackMessage{
+				Type: "hash",
+				Data: string(hash),
+			})
+			sendMessageToAllConn(PackMessage{
+				Type: "ok",
+				Data: string(hash),
+			})
 		}
-		sendMessageToAllConn(PackMessage{
-			Type: "hash",
-			Data: string(hash),
-		})
-		sendMessageToAllConn(PackMessage{
-			Type: "ok",
-			Data: string(hash),
-		})
 	}
 
 }
 
+// 1. 更改为fsnotify
 func runBuilder(ctx *internalContext) error {
 	ctx.mutex.Lock()
 	ctx.watcher = &watcher{
 		fs: ctx.realFS,
 		rebuild: func() fs.WatchData {
+			dirtyPath := ctx.watcher.tryToFindDirtyPath()
+			fmt.Println("dirtyPath: ", dirtyPath)
 			start := time.Now().UnixMilli()
-			state := ctx.rebuild()
+			state := ctx.incrementalBuild(dirtyPath)
 			onBuild(state.result)
 			fmt.Println("rebuild consume: ", time.Now().UnixMilli()-start, "ms")
 			return state.watchData
@@ -165,7 +176,7 @@ func (ctx *internalContext) DevServe(opts DevServeOptions) (ServeResult, error) 
 	defer ctx.mutex.Unlock()
 
 	if ctx.didDispose {
-		return ServeResult{}, errors.New("Cannot run dev serve on a disposed context")
+		return ServeResult{}, errors.New("cannot run dev serve on a disposed context")
 	}
 
 	var port uint16 = 8081
@@ -212,9 +223,9 @@ func (ctx *internalContext) DevServe(opts DevServeOptions) (ServeResult, error) 
 	ctx.devHandler = handler
 
 	go func() {
-		time.Sleep(10 * time.Millisecond)
 		runBuilder(ctx)
 	}()
+
 	var result ServeResult
 	result.Port = port
 	result.Host = host
