@@ -338,7 +338,7 @@ type BuildOptions struct {
 	Write          bool          // Documentation: https://esbuild.github.io/api/#write
 	AllowOverwrite bool          // Documentation: https://esbuild.github.io/api/#allow-overwrite
 	Plugins        []Plugin      // Documentation: https://esbuild.github.io/plugins/
-	Dev            bool
+	HMR            bool
 }
 
 type EntryPoint struct {

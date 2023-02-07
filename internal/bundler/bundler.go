@@ -1207,9 +1207,7 @@ func ScanBundle(
 	// 为什么在Watch模式下scanAllDependencies仍然耗时？
 	// 主要是因为每次都从entry遍历所有文件然后对文件里对引用的路径都进行resolve,
 	// 没有利用好watchData
-	start := time.Now().UnixMilli()
 	s.scanAllDependencies()
-	fmt.Println("scanAllDependencies: ", time.Now().UnixMilli()-start, "ms")
 
 	files := s.processScannedFiles(entryPointMeta)
 	bundle := Bundle{
@@ -1390,25 +1388,8 @@ func (s *scanner) maybeParseFile(
 		skipResolve:     skipResolve,
 		uniqueKeyPrefix: s.uniqueKeyPrefix,
 	}
+
 	go parseFile(s.parseArgsMap[path])
-	// go parseFile(parseArgs{
-	// 	fs:              s.fs,
-	// 	log:             s.log,
-	// 	res:             s.res,
-	// 	caches:          s.caches,
-	// 	keyPath:         path,
-	// 	prettyPath:      prettyPath,
-	// 	sourceIndex:     visited.sourceIndex,
-	// 	importSource:    importSource,
-	// 	sideEffects:     sideEffects,
-	// 	importPathRange: importPathRange,
-	// 	pluginData:      pluginData,
-	// 	options:         optionsClone,
-	// 	results:         s.resultChannel,
-	// 	inject:          inject,
-	// 	skipResolve:     skipResolve,
-	// 	uniqueKeyPrefix: s.uniqueKeyPrefix,
-	// })
 
 	return visited.sourceIndex
 }
@@ -1897,6 +1878,14 @@ func (s *scanner) scanAllDependencies() {
 	}
 }
 
+/**
+ 1. 生成meta信息
+ 2. 解决一个模块同时用import和require时实际引用的问题
+ 3. 检查是否有使用正确的loader加载模块，例如css里面引用js是不允许的，js使用css @import方式也是不允许
+ 4. 把js引用的css模块转换成一个对象输出
+ 5. 检查有没有TLA模块，不允许TLA模块出现
+ 所以pack过程可以使用后置检查？
+**/
 func (s *scanner) processScannedFiles(entryPointMeta []graph.EntryPoint) []scannerFile {
 	s.timer.Begin("Process scanned files")
 	defer s.timer.End("Process scanned files")

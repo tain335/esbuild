@@ -902,7 +902,6 @@ func contextImpl(buildOpts BuildOptions) (*internalContext, []Message) {
 		mangleCache:    buildOpts.MangleCache,
 		absWorkingDir:  absWorkingDir,
 		write:          buildOpts.Write,
-		dev:            buildOpts.Dev,
 	}
 
 	return &internalContext{
@@ -1005,7 +1004,7 @@ func (ctx *internalContext) incrementalBuild(dirtyPath string) rebuildState {
 		options:        ctx.args.options,
 		mangleCache:    ctx.args.mangleCache,
 		dirtyPath:      dirtyPath,
-		dev:            true,
+		hmr:            true,
 	}
 
 	return incrementalBuildImpl(args)
@@ -1258,6 +1257,7 @@ func validateBuildOptions(
 		CSSBanner:             bannerCSS,
 		CSSFooter:             footerCSS,
 		PreserveSymlinks:      buildOpts.PreserveSymlinks,
+		HMR:                   buildOpts.HMR,
 	}
 	if buildOpts.Conditions != nil {
 		options.Conditions = append([]string{}, buildOpts.Conditions...)
@@ -1383,7 +1383,6 @@ type rebuildArgs struct {
 	mangleCache    map[string]interface{}
 	absWorkingDir  string
 	write          bool
-	dev            bool
 }
 
 type rebuildState struct {
@@ -1411,6 +1410,8 @@ func rebuildImpl(args rebuildArgs, oldSummary buildSummary) rebuildState {
 	var toWriteToStdout []byte
 
 	var timer *helpers.Timer
+	// TODO 移除
+	api_helpers.UseTimer = true
 	if api_helpers.UseTimer {
 		timer = &helpers.Timer{}
 	}
@@ -1428,7 +1429,8 @@ func rebuildImpl(args rebuildArgs, oldSummary buildSummary) rebuildState {
 		// Compile the bundle
 		result.MangleCache = cloneMangleCache(log, args.mangleCache)
 		link := linker.Link
-		if args.dev {
+
+		if args.options.HMR {
 			link = packlinker.PackLink
 		}
 
@@ -1600,7 +1602,7 @@ type incrementalBuildArgs struct {
 	options        config.Options
 	mangleCache    map[string]interface{}
 	dirtyPath      string
-	dev            bool
+	hmr            bool
 }
 
 func incrementalBuildImpl(args incrementalBuildArgs) rebuildState {

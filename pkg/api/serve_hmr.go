@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/evanw/esbuild/internal/fs"
+	"github.com/evanw/esbuild/internal/helpers"
+	"github.com/evanw/esbuild/internal/logger"
 	"github.com/gorilla/websocket"
 )
 
@@ -151,21 +153,32 @@ func runBuilder(ctx *internalContext) error {
 		rebuild: func() fs.WatchData {
 			dirtyPath := ctx.watcher.tryToFindDirtyPath()
 			fmt.Println("dirtyPath: ", dirtyPath)
-			start := time.Now().UnixMilli()
+
+			timer := &helpers.Timer{}
+			log := logger.NewStderrLog(ctx.args.logOptions)
+			timer.Begin("Hot rebuild")
+
 			state := ctx.incrementalBuild(dirtyPath)
 			onBuild(state.result)
-			fmt.Println("rebuild consume: ", time.Now().UnixMilli()-start, "ms")
+
+			timer.End("Hot rebuild")
+			timer.Log(log)
+			log.Done()
 			return state.watchData
 		},
 	}
 	// 必须开启watch mode
 	ctx.args.options.WatchMode = true
 	ctx.mutex.Unlock()
-	start := time.Now().UnixMilli()
+	timer := &helpers.Timer{}
+	log := logger.NewStderrLog(ctx.args.logOptions)
+	timer.Begin("First build")
 	ctx.watcher.start(ctx.args.logOptions.LogLevel, ctx.args.logOptions.Color)
 	buildResult := ctx.rebuild().result
 	onBuild(buildResult)
-	fmt.Println("first build consume: ", time.Now().UnixMilli()-start, "ms")
+	timer.End("First build")
+	timer.Log(log)
+	log.Done()
 	return nil
 }
 

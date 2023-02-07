@@ -343,6 +343,7 @@ type Options struct {
 	NeedsMetafile           bool
 	SourceMap               SourceMap
 	ExcludeSourcesContent   bool
+	HMR                     bool
 }
 
 type TargetFromAPI uint8
