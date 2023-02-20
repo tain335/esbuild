@@ -117,7 +117,6 @@ func parseFile(args parseArgs) {
 		PrettyPath:     args.prettyPath,
 		IdentifierName: js_ast.GenerateNonUniqueNameFromPath(args.keyPath.Text),
 	}
-
 	var loader config.Loader
 	var absResolveDir string
 	var pluginName string
@@ -359,11 +358,9 @@ func parseFile(args parseArgs) {
 			records := append([]ast.ImportRecord{}, *recordsPtr...)
 			*recordsPtr = records
 			result.resolveResults = make([]*resolver.ResolveResult, len(records))
-
 			if len(records) > 0 {
 				resolverCache := make(map[ast.ImportKind]map[string]*resolver.ResolveResult)
 				tracker := logger.MakeLineColumnTracker(&source)
-
 				for importRecordIndex := range records {
 					// Don't try to resolve imports that are already resolved
 					record := &records[importRecordIndex]
@@ -376,7 +373,6 @@ func parseFile(args parseArgs) {
 					if record.Flags.Has(ast.IsUnused) {
 						continue
 					}
-
 					// Cache the path in case it's imported multiple times in this file
 					cache, ok := resolverCache[record.Kind]
 					if !ok {
@@ -387,7 +383,6 @@ func parseFile(args parseArgs) {
 						result.resolveResults[importRecordIndex] = resolveResult
 						continue
 					}
-
 					// Run the resolver and log an error if the path couldn't be resolved
 					resolveResult, didLogError, debug := RunOnResolvePlugins(
 						args.options.Plugins,
@@ -1092,9 +1087,6 @@ func generateUniqueKeyPrefix() (string, error) {
 	return base64.URLEncoding.EncodeToString(data[:]), nil
 }
 
-var lastBundle *Bundle
-var lastScanner *scanner
-
 // This creates a bundle by scanning over the whole module graph starting from
 // the entry points until all modules are reached. Each module has some number
 // of import paths which are resolved to module identifiers (i.e. "onResolve"
@@ -1218,39 +1210,7 @@ func ScanBundle(
 		uniqueKeyPrefix: uniqueKeyPrefix,
 		options:         s.options,
 	}
-	lastBundle = &bundle
-	lastScanner = &s
 	return bundle
-}
-
-func IncrementalBuildBundle(path string) (Bundle, fs.WatchData) {
-	var sourceIndex uint32
-	var lp logger.Path
-	for _, f := range lastScanner.results {
-		if f.file.inputFile.Source.KeyPath.Text == path {
-			sourceIndex = f.file.inputFile.Source.Index
-			lp = f.file.inputFile.Source.KeyPath
-			break
-		}
-	}
-	if sourceIndex != 0 {
-		lastBundle.fs.ClearPath(path)
-		lastScanner.remaining++
-		go parseFile(lastScanner.parseArgsMap[lp])
-		lastScanner.scanAllDependencies()
-		files := lastScanner.processScannedFiles(lastBundle.entryPoints)
-		bundle := Bundle{
-			fs:              lastBundle.fs,
-			res:             lastScanner.res,
-			files:           files,
-			entryPoints:     lastBundle.entryPoints,
-			uniqueKeyPrefix: lastBundle.uniqueKeyPrefix,
-			options:         lastScanner.options,
-		}
-		lastBundle = &bundle
-		return bundle, bundle.fs.WatchData()
-	}
-	return *lastBundle, lastBundle.fs.WatchData()
 }
 
 type inputKind uint8
@@ -1370,6 +1330,26 @@ func (s *scanner) maybeParseFile(
 		sideEffects.Kind = graph.NoSideEffects_PackageJSON
 		sideEffects.Data = resolveResult.PrimarySideEffectsData
 	}
+	//TODO 清理
+	// s.parseArgsMap[path] = parseArgs{
+	// 	fs:              s.fs,
+	// 	log:             s.log,
+	// 	res:             s.res,
+	// 	caches:          s.caches,
+	// 	keyPath:         path,
+	// 	prettyPath:      prettyPath,
+	// 	sourceIndex:     visited.sourceIndex,
+	// 	importSource:    importSource,
+	// 	sideEffects:     sideEffects,
+	// 	importPathRange: importPathRange,
+	// 	pluginData:      pluginData,
+	// 	options:         optionsClone,
+	// 	results:         s.resultChannel,
+	// 	inject:          inject,
+	// 	skipResolve:     skipResolve,
+	// 	uniqueKeyPrefix: s.uniqueKeyPrefix,
+	// }
+
 	s.parseArgsMap[path] = parseArgs{
 		fs:              s.fs,
 		log:             s.log,

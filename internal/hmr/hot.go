@@ -1,6 +1,8 @@
-package hot
+package hmr
 
-import "github.com/evanw/esbuild/internal/logger"
+import (
+	"github.com/evanw/esbuild/internal/logger"
+)
 
 func devClient() string {
 	return `var protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
@@ -182,10 +184,12 @@ func devClient() string {
 	}`
 }
 
-func GenerateDevClient() logger.Source {
+var DevClientPath = logger.Path{Text: "<dev_client>"}
+
+func GenerateDevClient(souceIndex uint32) logger.Source {
 	return logger.Source{
-		Index:          ^uint32(0) - 1,
-		KeyPath:        logger.Path{Text: "<dev_client>"},
+		Index:          souceIndex,
+		KeyPath:        DevClientPath,
 		PrettyPath:     "<dev_client>",
 		IdentifierName: "dev_client",
 		Contents:       devClient(),

@@ -1,4 +1,4 @@
-package hot
+package hmr
 
 import "github.com/evanw/esbuild/internal/logger"
 
@@ -958,10 +958,12 @@ require.$Refresh$.runtime = exports;
 	`
 }
 
-func GenerateReactRefershRuntime() logger.Source {
+var ReactRefreshRuntimePath = logger.Path{Text: "<react_refresh_runtime>"}
+
+func GenerateReactRefershRuntime(sourceIndex uint32) logger.Source {
 	return logger.Source{
-		Index:          ^uint32(0) - 3,
-		KeyPath:        logger.Path{Text: "<react_refresh_runtime>"},
+		Index:          sourceIndex,
+		KeyPath:        ReactRefreshRuntimePath,
 		PrettyPath:     "<react_refresh_runtime>",
 		IdentifierName: "react_refresh_runtime",
 		Contents:       reactRefreshRuntime(),

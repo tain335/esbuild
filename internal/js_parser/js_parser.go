@@ -530,7 +530,6 @@ func (a *Options) Equal(b *Options) bool {
 
 	// Compare "JSX"
 	if a.jsx.Parse != b.jsx.Parse || !jsxExprsEqual(a.jsx.Factory, b.jsx.Factory) || !jsxExprsEqual(a.jsx.Fragment, b.jsx.Fragment) {
-		fmt.Println("JSX")
 		return false
 	}
 

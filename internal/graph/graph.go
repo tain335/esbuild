@@ -123,6 +123,9 @@ type LinkerGraph struct {
 	StableSourceIndices []uint32
 }
 
+// 1. 从原ast上复制一份 representation，symbol map， parts，import records，import map, export map, top-level scope
+// 2. 拆分动态导入的模块
+// 3. 合并所有tsEnums
 func CloneLinkerGraph(
 	inputFiles []InputFile,
 	reachableFiles []uint32,
@@ -150,7 +153,6 @@ func CloneLinkerGraph(
 	for stableIndex, sourceIndex := range reachableFiles {
 		// Create a way to convert source indices to a stable ordering
 		stableSourceIndices[sourceIndex] = uint32(stableIndex)
-
 		go func(sourceIndex uint32) {
 			file := &files[sourceIndex]
 			file.InputFile = inputFiles[sourceIndex]

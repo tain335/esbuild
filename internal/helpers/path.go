@@ -20,3 +20,7 @@ func IsInsideNodeModules(path string) bool {
 		path = dir
 	}
 }
+
+func IsInternalModule(path string) bool {
+	return strings.HasPrefix(path, "<") && strings.HasSuffix(path, ">")
+}

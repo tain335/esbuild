@@ -1,4 +1,4 @@
-package hot
+package hmr
 
 import "github.com/evanw/esbuild/internal/logger"
 
@@ -270,10 +270,12 @@ func styleRuntime() string {
   };`
 }
 
-func GenerateStyleRuntime() logger.Source {
+var StyleRuntimePath = logger.Path{Text: "<style_runtime>"}
+
+func GenerateStyleRuntime(sourceIndex uint32) logger.Source {
 	return logger.Source{
-		Index:          ^uint32(0) - 2,
-		KeyPath:        logger.Path{Text: "<style_runtime>"},
+		Index:          sourceIndex,
+		KeyPath:        StyleRuntimePath,
 		PrettyPath:     "<style_runtime>",
 		IdentifierName: "style_runtime",
 		Contents:       styleRuntime(),

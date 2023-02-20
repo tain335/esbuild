@@ -32,7 +32,6 @@ import (
 	"github.com/evanw/esbuild/internal/js_parser"
 	"github.com/evanw/esbuild/internal/linker"
 	"github.com/evanw/esbuild/internal/logger"
-	packlinker "github.com/evanw/esbuild/internal/pack_linker"
 	"github.com/evanw/esbuild/internal/resolver"
 	"github.com/evanw/esbuild/internal/xxhash"
 )
@@ -924,7 +923,7 @@ type internalContext struct {
 	latestSummary buildSummary
 	realFS        fs.FS
 	absWorkingDir string
-	watcher       *watcher
+	watcher       watcherInterface
 	handler       *apiHandler
 	devHandler    *devApiHandler
 	didDispose    bool
@@ -957,7 +956,12 @@ func (ctx *internalContext) rebuild() rebuildState {
 	ctx.mutex.Unlock()
 
 	// Do the build without holding the mutex
-	build.state = rebuildImpl(args, oldSummary)
+	if args.options.HMR {
+		build.state = streamBuildImpl(args, oldSummary)
+	} else {
+		build.state = rebuildImpl(args, oldSummary)
+	}
+
 	if handler != nil {
 		handler.broadcastBuildResult(build.state.result, build.state.summary)
 	}
@@ -1410,8 +1414,6 @@ func rebuildImpl(args rebuildArgs, oldSummary buildSummary) rebuildState {
 	var toWriteToStdout []byte
 
 	var timer *helpers.Timer
-	// TODO 移除
-	api_helpers.UseTimer = true
 	if api_helpers.UseTimer {
 		timer = &helpers.Timer{}
 	}
@@ -1429,10 +1431,6 @@ func rebuildImpl(args rebuildArgs, oldSummary buildSummary) rebuildState {
 		// Compile the bundle
 		result.MangleCache = cloneMangleCache(log, args.mangleCache)
 		link := linker.Link
-
-		if args.options.HMR {
-			link = packlinker.PackLink
-		}
 
 		results, metafile := bundle.Compile(log, timer, result.MangleCache, link)
 
@@ -1607,8 +1605,9 @@ type incrementalBuildArgs struct {
 
 func incrementalBuildImpl(args incrementalBuildArgs) rebuildState {
 	log := logger.NewStderrLog(args.logOptions)
-	bundle, watchData := bundler.IncrementalBuildBundle(args.dirtyPath)
+	bundle := bundler.IncrementalBuildBundle(args.dirtyPath)
 
+	api_helpers.UseTimer = true
 	var timer *helpers.Timer
 	if api_helpers.UseTimer {
 		timer = &helpers.Timer{}
@@ -1617,9 +1616,9 @@ func incrementalBuildImpl(args incrementalBuildArgs) rebuildState {
 	var result BuildResult
 	result.MangleCache = cloneMangleCache(log, args.mangleCache)
 
-	link := packlinker.PackLink
+	// link := packlinker.PackLink
 
-	results, metafile := bundle.Compile(log, timer, result.MangleCache, link)
+	results, metafile, watchData := bundle.Compile(log, timer, result.MangleCache)
 
 	result.Metafile = metafile
 
@@ -1634,9 +1633,54 @@ func incrementalBuildImpl(args incrementalBuildArgs) rebuildState {
 			Contents: item.Contents,
 		}
 	}
+
+	timer.Log(log)
+
+	log.Done()
 	return rebuildState{
 		watchData: watchData,
 		result:    result,
+	}
+}
+
+func streamBuildImpl(args rebuildArgs, oldSummary buildSummary) rebuildState {
+	log := logger.NewStderrLog(args.logOptions)
+	var result BuildResult
+
+	api_helpers.UseTimer = true
+	var timer *helpers.Timer
+	if api_helpers.UseTimer {
+		timer = &helpers.Timer{}
+	}
+
+	// Convert and validate the buildOpts
+	realFS, _ := fs.RealFS(fs.RealFSOptions{
+		AbsWorkingDir: args.absWorkingDir,
+		WantWatchData: args.options.WatchMode,
+	})
+
+	bundle := bundler.ScanBundleByStream(log, realFS, args.caches, args.entryPoints, args.options, nil)
+	results, metafile, watchData := bundle.Compile(log, timer, result.MangleCache)
+
+	result.OutputFiles = make([]OutputFile, len(results))
+	result.Metafile = metafile
+	for i, item := range results {
+		if args.options.WriteToStdout {
+			item.AbsPath = "<stdout>"
+		}
+		result.OutputFiles[i] = OutputFile{
+			Path:     item.AbsPath,
+			Contents: item.Contents,
+		}
+	}
+
+	timer.Log(log)
+
+	log.Done()
+	// watchData := realFS.WatchData()
+	return rebuildState{
+		result:    result,
+		watchData: watchData,
 	}
 }
 

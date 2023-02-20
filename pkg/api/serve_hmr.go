@@ -5,20 +5,29 @@ import (
 	"fmt"
 	"net/http"
 	"path"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	_ "net/http/pprof"
+
 	"github.com/evanw/esbuild/internal/fs"
 	"github.com/evanw/esbuild/internal/helpers"
 	"github.com/evanw/esbuild/internal/logger"
 	"github.com/gorilla/websocket"
+	"golang.org/x/exp/slices"
 )
 
 type PackMessage struct {
 	Type string `json:"type"`
 	Data string `json:"data"`
+}
+
+type ClientConnection struct {
+	conn  *websocket.Conn
+	mutex *sync.Mutex
 }
 
 type devApiHandler struct {
@@ -32,44 +41,62 @@ var upgrader = websocket.Upgrader{
 }
 var timeout = 30 * time.Second
 
-var connectionsMutex = sync.Mutex{}
-var connections = make([]*websocket.Conn, 0, 64)
+var clientsMutex = sync.Mutex{}
+var clients = make([]*ClientConnection, 0, 64)
 var fileCache = make(map[string][]byte)
 
 func removeConnFromSet(conn *websocket.Conn) {
-	connectionsMutex.Lock()
-	defer connectionsMutex.Unlock()
-}
-
-func addConnToSet(conn *websocket.Conn) {
-	connectionsMutex.Lock()
-	defer connectionsMutex.Unlock()
-	connections = append(connections, conn)
-}
-
-func sendMessageToAllConn(message PackMessage) {
-	for _, conn := range connections {
-		conn.WriteJSON(message)
+	clientsMutex.Lock()
+	defer clientsMutex.Unlock()
+	index := 1
+	for i, client := range clients {
+		if client.conn == conn {
+			index = i
+		}
+	}
+	if index != -1 {
+		slices.Delete(clients, index, index)
 	}
 }
 
-func serveClient(conn *websocket.Conn) {
-	defer func() {
-		conn.Close()
-	}()
-	conn.SetReadLimit(1024 * 1024) // 1MB
+func addConnToSet(conn *websocket.Conn) *ClientConnection {
+	clientsMutex.Lock()
+	defer clientsMutex.Unlock()
+	client := &ClientConnection{
+		conn:  conn,
+		mutex: &sync.Mutex{},
+	}
+	clients = append(clients, client)
+	return client
+}
+
+func sendMessageToAllConn(message PackMessage) {
+	clientsMutex.Lock()
+	defer clientsMutex.Unlock()
+	for _, client := range clients {
+		client.mutex.Lock()
+		client.conn.WriteJSON(message)
+		client.mutex.Unlock()
+	}
+}
+
+func serveClient(client *ClientConnection) {
+	defer client.conn.Close()
+	client.conn.SetReadLimit(1024 * 1024) // 1MB
 	for {
-		conn.SetReadDeadline(time.Now().Add(timeout))
-		_, message, err := conn.ReadMessage()
+		client.conn.SetReadDeadline(time.Now().Add(timeout))
+		_, message, err := client.conn.ReadMessage()
 		if err != nil {
 			// error
 			break
 		}
 		if string(message) == "ping" {
-			conn.SetWriteDeadline(time.Now().Add(timeout))
-			conn.WriteJSON(PackMessage{
+			client.conn.SetWriteDeadline(time.Now().Add(timeout))
+			client.mutex.Lock()
+			client.conn.WriteJSON(PackMessage{
 				Type: "pong",
 			})
+			client.mutex.Unlock()
 		}
 	}
 }
@@ -85,9 +112,9 @@ func socketHandler(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
-	addConnToSet(conn)
+	client := addConnToSet(conn)
 
-	go serveClient(conn)
+	serveClient(client)
 }
 
 func resourceHandler(w http.ResponseWriter, r *http.Request) {
@@ -145,10 +172,9 @@ func onBuild(br BuildResult) {
 
 }
 
-// 1. 更改为fsnotify
 func runBuilder(ctx *internalContext) error {
 	ctx.mutex.Lock()
-	ctx.watcher = &watcher{
+	ctx.watcher = &notifyWatcher{
 		fs: ctx.realFS,
 		rebuild: func() fs.WatchData {
 			dirtyPath := ctx.watcher.tryToFindDirtyPath()
@@ -159,7 +185,7 @@ func runBuilder(ctx *internalContext) error {
 			timer.Begin("Hot rebuild")
 
 			state := ctx.incrementalBuild(dirtyPath)
-			onBuild(state.result)
+			go onBuild(state.result)
 
 			timer.End("Hot rebuild")
 			timer.Log(log)
@@ -173,9 +199,9 @@ func runBuilder(ctx *internalContext) error {
 	timer := &helpers.Timer{}
 	log := logger.NewStderrLog(ctx.args.logOptions)
 	timer.Begin("First build")
-	ctx.watcher.start(ctx.args.logOptions.LogLevel, ctx.args.logOptions.Color)
 	buildResult := ctx.rebuild().result
 	onBuild(buildResult)
+	runtime.GC()
 	timer.End("First build")
 	timer.Log(log)
 	log.Done()
@@ -208,8 +234,7 @@ func (ctx *internalContext) DevServe(opts DevServeOptions) (ServeResult, error) 
 	// TEST
 	html := `<!DOCTYPE html>
 <html>
-	<head>
-	</head>
+	<head></head>
 	<body>
 	<div id="root"></div>
 	<script src="/index.js"></script>
@@ -237,6 +262,10 @@ func (ctx *internalContext) DevServe(opts DevServeOptions) (ServeResult, error) 
 
 	go func() {
 		runBuilder(ctx)
+	}()
+
+	go func() {
+		http.ListenAndServe("0.0.0.0:8080", nil)
 	}()
 
 	var result ServeResult

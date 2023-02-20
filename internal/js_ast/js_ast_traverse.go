@@ -171,9 +171,6 @@ func visitStmt(stmt *Stmt, visitor ASTVisitorInterface, parentPath *NodePath, it
 	switch stmt.Data.(type) {
 	case *SBlock:
 		iterateStmts(&stmt.Data.(*SBlock).Stmts)
-		// for i := range stmt.Data.(*SBlock).Stmts {
-		// 	visitStmt(&stmt.Data.(*SBlock).Stmts[i], visitor, stmtPath)
-		// }
 	case *SExportDefault:
 		visitStmt(&stmt.Data.(*SExportDefault).Value, visitor, stmtPath, iterator)
 	case *SExportEquals:
@@ -228,12 +225,9 @@ func visitStmt(stmt *Stmt, visitor ASTVisitorInterface, parentPath *NodePath, it
 	case *SSwitch:
 		visitExpr(&stmt.Data.(*SSwitch).Test, visitor, stmtPath, iterator)
 		for i := range stmt.Data.(*SSwitch).Cases {
-			c := stmt.Data.(*SSwitch).Cases[i]
+			c := &stmt.Data.(*SSwitch).Cases[i]
 			visitExpr(&c.ValueOrNil, visitor, stmtPath, iterator)
 			iterateStmts(&c.Body)
-			// for j := range c.Body {
-			// 	visitStmt(&c.Body[j], visitor, stmtPath)
-			// }
 		}
 	case *SReturn:
 		visitExpr(&stmt.Data.(*SReturn).ValueOrNil, visitor, stmtPath, iterator)

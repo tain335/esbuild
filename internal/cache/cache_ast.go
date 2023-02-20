@@ -191,3 +191,9 @@ func (c *JSCache) Parse(log logger.Log, source logger.Source, options js_parser.
 	c.entries[source.KeyPath] = entry
 	return ast, ok
 }
+
+func (c *JSCache) Clear(path logger.Path) {
+	c.mutex.Lock()
+	delete(c.entries, path)
+	c.mutex.Unlock()
+}

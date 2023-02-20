@@ -347,7 +347,6 @@ type Source struct {
 }
 
 func (s *Source) Equal(other *Source) bool {
-	// spew.Dump(s, other)
 	return s.Contents == other.Contents &&
 		s.IdentifierName == other.IdentifierName &&
 		s.Index == other.Index &&

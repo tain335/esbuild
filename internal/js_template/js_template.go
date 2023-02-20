@@ -21,7 +21,7 @@ import (
 // 			},
 // 		},
 // 	}, make([]js_ast.Symbol, 0), js_parser.Options{})
-func Template(log logger.Log, sourceIndex uint32, template string, data map[string]interface{}, options js_parser.Options) *js_ast.AST {
+func Template(log logger.Log, sourceIndex uint32, template string, astNodes map[string]interface{}, options js_parser.Options) *js_ast.AST {
 	ast, _ := js_parser.Parse(log, logger.Source{
 		Index:          sourceIndex,
 		KeyPath:        logger.Path{Text: "<template>"},
@@ -37,7 +37,7 @@ func Template(log logger.Log, sourceIndex uint32, template string, data map[stri
 					name := ast.Symbols[expr.Ref.InnerIndex].OriginalName
 					if strings.HasPrefix(name, "$$") && strings.HasSuffix(name, "$$") {
 						name = name[2 : len(name)-2]
-						if node, ok := data[name]; ok {
+						if node, ok := astNodes[name]; ok {
 							s.Data = node.(js_ast.S)
 						}
 					}
@@ -50,7 +50,7 @@ func Template(log logger.Log, sourceIndex uint32, template string, data map[stri
 				name := ast.Symbols[e.Data.(*js_ast.EIdentifier).Ref.InnerIndex].OriginalName
 				if strings.HasPrefix(name, "$$") && strings.HasSuffix(name, "$$") {
 					name = name[2 : len(name)-2]
-					if node, ok := data[name]; ok {
+					if node, ok := astNodes[name]; ok {
 						e.Data = node.(js_ast.E)
 					}
 				}

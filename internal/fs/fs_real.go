@@ -528,5 +528,7 @@ func (fs *realFS) WatchData() WatchData {
 }
 
 func (fs *realFS) ClearPath(path string) {
+	fs.watchMutex.Lock()
 	delete(fs.watchData, path)
+	fs.watchMutex.Unlock()
 }
