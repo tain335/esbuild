@@ -2,6 +2,7 @@ package sourcemap
 
 import (
 	"bytes"
+	"fmt"
 	"unicode/utf8"
 
 	"github.com/evanw/esbuild/internal/ast"
@@ -439,6 +440,7 @@ func AppendSourceMapChunk(j *helpers.Joiner, prevEndState SourceMapState, startS
 	startState.OriginalLine += originalLine
 	startState.OriginalColumn += originalColumn
 	prevEndState.HasOriginalName = false // This is handled separately below
+	fmt.Printf("encode: source_index: %d, generate_column: %d, line: %d\n", startState.SourceIndex-prevEndState.SourceIndex, startState.GeneratedColumn-prevEndState.GeneratedColumn, startState.OriginalLine-prevEndState.OriginalLine)
 	rewritten, _ := appendMappingToBuffer(nil, j.LastByte(), prevEndState, startState)
 	j.AddBytes(rewritten)
 
@@ -463,13 +465,11 @@ func appendMappingToBuffer(buffer []byte, lastByte byte, prevState SourceMapStat
 	if lastByte != 0 && lastByte != ';' && lastByte != '"' {
 		buffer = append(buffer, ',')
 	}
-
 	// Record the mapping (note that the generated line is recorded using ';' elsewhere)
 	buffer = encodeVLQ(buffer, currentState.GeneratedColumn-prevState.GeneratedColumn)
 	buffer = encodeVLQ(buffer, currentState.SourceIndex-prevState.SourceIndex)
 	buffer = encodeVLQ(buffer, currentState.OriginalLine-prevState.OriginalLine)
 	buffer = encodeVLQ(buffer, currentState.OriginalColumn-prevState.OriginalColumn)
-
 	// Record the optional original name
 	var nameOffset ast.Index32
 	if currentState.HasOriginalName {

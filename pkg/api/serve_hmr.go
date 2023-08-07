@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"path"
 	"runtime"
 	"strconv"
@@ -156,7 +157,11 @@ func onBuild(br BuildResult) {
 			hash := br.OutputFiles[len(br.OutputFiles)-1].Contents
 
 			for _, file := range br.OutputFiles {
-				println(file.Path, path.Base(file.Path))
+				fmt.Println(file.Path, path.Base(file.Path))
+				err := os.WriteFile(file.Path, file.Contents, 0644)
+				if err != nil {
+					fmt.Println(err)
+				}
 				fileCache[path.Base(file.Path)] = file.Contents
 			}
 			sendMessageToAllConn(PackMessage{

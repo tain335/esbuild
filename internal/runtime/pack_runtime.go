@@ -2,14 +2,14 @@ package runtime
 
 import (
 	"regexp"
+	"strings"
 
 	"github.com/evanw/esbuild/internal/logger"
 )
 
 func packCode(hash string) string {
 	m := regexp.MustCompile(`{{\w+}}`)
-	code := `
-(function(modules) { // webpackBootstrap
+	code := `(function(modules) { // webpackBootstrap
 	// install a JSONP callback for chunk loading
 	function webpackJsonpCallback(data) {
 		var chunkIds = data[0];
@@ -1039,7 +1039,7 @@ func packCode(hash string) string {
 	checkDeferredModules();
 })({});
 `
-	return m.ReplaceAllStringFunc(code, func(s string) string {
+	return m.ReplaceAllStringFunc(strings.TrimLeft(code, "\n"), func(s string) string {
 		if s == "{{hash}}" {
 			return hash
 		}

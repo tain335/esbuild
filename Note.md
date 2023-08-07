@@ -97,7 +97,7 @@ scope 里面top level var声明都要移动到top scope上
 创建symbol，要把创建的symbol添加到parser的symbols
 
 symbol 和 identifier区别
-identifier在词法都是一个标识符，但是解释阶段都会关联为symbo，所以解释过程中要看上下文来决定要不要创建symbol
+identifier在词法都是一个标识符，但是解释阶段都会关联为symbol，所以解释过程中要看上下文来决定要不要创建symbol
 
 ## 关键结构
 type Ref struct {
@@ -280,9 +280,9 @@ Step 2
 2. 优化增量更新逻辑，目标在200ms
 3. 使用fsnotify替换原本的watcher
 4. ejs插件
-5. source_map
+5. source_map // doing
 6. tree shaking效果对比
-7. stream link降低开发时内存消耗
+7. stream link降低开发时内存消耗 // doing
 目标：能够使用espack开发项目
 
 Step 3

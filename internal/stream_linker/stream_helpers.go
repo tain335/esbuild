@@ -57,8 +57,8 @@ func printJS(source logger.Source, ast *js_ast.AST, symbols *js_ast.SymbolMap, o
 	lineOffsetTable := sourcemap.GenerateLineOffsetTables(source.Contents, ast.ApproximateLineCount)
 	return js_printer.Print(*ast, *symbols, r, js_printer.Options{
 		LineOffsetTables:    lineOffsetTable,
-		AddSourceMappings:   true,
-		SourceMap:           config.SourceMapExternalWithoutComment,
+		AddSourceMappings:   options.SourceMap != config.SourceMapNone,
+		SourceMap:           options.SourceMap,
 		OutputFormat:        config.FormatCommonJS,
 		UnsupportedFeatures: options.UnsupportedJSFeatureOverrides,
 		RequireOrImportMetaForSource: func(u uint32) (meta js_printer.RequireOrImportMeta) {

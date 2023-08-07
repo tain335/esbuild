@@ -60,8 +60,8 @@ type ModuleTransformerContext struct {
 }
 
 type ModuleTransformResult struct {
-	JS        string
-	SourceMap sourcemap.Chunk
+	JS             string
+	SourceMapChunk sourcemap.Chunk
 }
 
 func NewModuleTransformerContext(
@@ -88,7 +88,7 @@ func NewModuleTransformerContext(
 		moduleRef:                   ast.ModuleRef,
 		exportsRef:                  ast.ExportsRef,
 		requireRef:                  requireRef,
-		options:                     &config.Options{},
+		options:                     options,
 	}
 }
 
@@ -926,7 +926,7 @@ func (c *ModuleTransformerContext) generateReactRefreshCode() {
 	}
 }
 
-func (c *ModuleTransformerContext) wrapperCJS() {
+func (c *ModuleTransformerContext) wrapCJS() {
 	directive := c.ast.Directive
 	c.ast.Directive = ""
 
@@ -986,12 +986,14 @@ func (c *ModuleTransformerContext) wrapperCJS() {
 	}
 }
 
-func (c *ModuleTransformerContext) output() ModuleTransformResult {
-	c.wrapperCJS()
+func (c *ModuleTransformerContext) output(needWrapper bool) ModuleTransformResult {
+	if needWrapper {
+		c.wrapCJS()
+	}
 	pr := printJS(c.source, c.ast, c.symbols, c.options)
 	return ModuleTransformResult{
-		JS:        strings.TrimRight(string(pr.JS), ";\n"),
-		SourceMap: pr.SourceMapChunk,
+		JS:             strings.TrimRight(string(pr.JS), ";\n"),
+		SourceMapChunk: pr.SourceMapChunk,
 	}
 }
 
@@ -1014,7 +1016,7 @@ func (c *ModuleTransformerContext) transformOtherToCJS() ModuleTransformResult {
 
 	js_ast.TraverseAST(c.ast.Parts, covertVistor)
 
-	return c.output()
+	return c.output(true)
 }
 
 func (c *ModuleTransformerContext) transformESMToCJS() ModuleTransformResult {
@@ -1075,5 +1077,5 @@ func (c *ModuleTransformerContext) transformESMToCJS() ModuleTransformResult {
 		imporRecord.Path.Text = result.PathPair.Primary.Text
 	}
 
-	return c.output()
+	return c.output(true)
 }

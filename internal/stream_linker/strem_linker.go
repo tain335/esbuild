@@ -31,17 +31,17 @@ type StremInputFile struct {
 }
 
 type StreamInputFileCacheEntry struct {
-	InputFile     graph.InputFile
-	Output        string
-	ResolveRsults []*resolver.ResolveResult
-	SourceMap     sourcemap.Chunk
+	InputFile      graph.InputFile
+	Output         string
+	ResolveRsults  []*resolver.ResolveResult
+	SourceMapChunk sourcemap.Chunk
 	// genereate css file
 	CSSMedia    string
 	CSSEncoding string
 	CSSClones   []uint32
 }
 
-func generatePackCode(chunkId, moduleId, code string, execArray []string) string {
+func generatePackCode(chunkId string, module *LinkModule, execArray []string) (string, sourcemap.LineColumnOffset) {
 	var execCode string
 	if len(execArray) > 0 {
 		var execModuleIds []string
@@ -50,7 +50,17 @@ func generatePackCode(chunkId, moduleId, code string, execArray []string) string
 		}
 		execCode = "[" + strings.Join(execModuleIds, ", ") + "]"
 	}
-	return fmt.Sprintf("webpackJsonp.push([[\"%s\"], {\"%s\": %s },[%s]]);\n", chunkId, moduleId, code, execCode)
+	j := helpers.Joiner{}
+	packCodePrev := fmt.Sprintf("webpackJsonp.push([[\"%s\"], {\"%s\": ", chunkId, module.moduleId)
+	j.AddString(packCodePrev)
+	module.generatedOffset.AdvanceString(packCodePrev)
+	j.AddString(module.content)
+	packCodePost := fmt.Sprintf(" },[%s]]);\n", execCode)
+	j.AddString(packCodePost)
+
+	nextGenerateOffset := sourcemap.LineColumnOffset{}
+	// nextGenerateOffset.AdvanceString(packCodePost)
+	return string(j.Done()), nextGenerateOffset
 }
 
 type ModuleState int16
@@ -125,20 +135,78 @@ func generateNewSymbolMap(source logger.Source, ast *js_ast.AST) *js_ast.SymbolM
 	return &symbolMap
 }
 
-// func generateRuntimeCodeModule(log logger.Log, source logger.Source) LinkModule {
-// 	if moduleAST, ok := js_parser.Parse(log, source, js_parser.Options{}); ok {
-// 		fileSymbols := append([]js_ast.Symbol{}, moduleAST.Symbols...)
-// 		symbolMap.SymbolsForSource[source.Index] = fileSymbols
-// 		context := NewModuleTransformerContext(log, source, &symbolMap, []*resolver.ResolveResult{}, &moduleAST, buildOptions)
-// 		code := context.transformESMToCJS()
-// 		return LinkModule{
-// 			moduleId: source.KeyPath.Text,
-// 			content:  code.JS,
-// 		}
-// 	} else {
-// 		panic("cannot parse source: " + source.IdentifierName)
-// 	}
-// }
+func generateInitialModuleSource(log logger.Log, entrySource logger.Source) logger.Source {
+	entryModuleId := entrySource.KeyPath.Text
+	source := logger.Source{
+		Index: ^uint32(0) - entrySource.Index,
+		KeyPath: logger.Path{
+			Text: fmt.Sprintf("<initial_module_%d>", entrySource.Index),
+		},
+		Contents: `
+			require("<dev_client>")
+			require("<react_refresh_runtime>")
+			require("` + entryModuleId + `")
+		`,
+	}
+	moduleAST, _ := js_parser.Parse(log, source, js_parser.Options{})
+	moduleAST.ImportRecords = append(moduleAST.ImportRecords,
+		ast.ImportRecord{
+			Kind:        ast.PackRequire,
+			Path:        hmr.DevClientPath,
+			SourceIndex: ast.MakeIndex32(runtimeSourceCache[hmr.DevClientPath.Text]),
+		},
+		ast.ImportRecord{
+			Kind:        ast.PackRequire,
+			Path:        hmr.ReactRefreshRuntimePath,
+			SourceIndex: ast.MakeIndex32(runtimeSourceCache[hmr.ReactRefreshRuntimePath.Text]),
+		},
+		ast.ImportRecord{
+			Kind:        ast.PackRequire,
+			SourceIndex: ast.MakeIndex32(entrySource.Index),
+			Path:        entrySource.KeyPath,
+		})
+
+	symbolMap := generateNewSymbolMap(source, &moduleAST)
+	context := NewModuleTransformerContext(log, source, symbolMap, []*resolver.ResolveResult{}, runtimeSourceCache, &moduleAST, buildOptions)
+	result := context.transformESMToCJS()
+	moduleFileCache[source.Index] = &StreamInputFileCacheEntry{
+		InputFile: graph.InputFile{
+			Source: source,
+			Repr: &graph.JSRepr{
+				AST: moduleAST,
+			},
+		},
+		Output:         result.JS,
+		SourceMapChunk: result.SourceMapChunk,
+	}
+	return source
+}
+
+func generateRuntimeModule(log logger.Log, source logger.Source) LinkModule {
+	if moduleAST, ok := js_parser.Parse(log, source, js_parser.Options{}); ok {
+		symbolMap := generateNewSymbolMap(source, &moduleAST)
+		context := NewModuleTransformerContext(log, source, symbolMap, []*resolver.ResolveResult{}, runtimeSourceCache, &moduleAST, buildOptions)
+		result := context.output(false)
+		moduleFileCache[source.Index] = &StreamInputFileCacheEntry{
+			InputFile: graph.InputFile{
+				Source: source,
+				Repr: &graph.JSRepr{
+					AST: moduleAST,
+				},
+			},
+			Output:         result.JS,
+			SourceMapChunk: result.SourceMapChunk,
+		}
+		return LinkModule{
+			sourceIndex:    source.Index,
+			moduleId:       source.KeyPath.Text,
+			content:        result.JS,
+			sourcemapChunk: result.SourceMapChunk,
+		}
+	} else {
+		panic("cannot parse source: " + source.IdentifierName)
+	}
+}
 
 func linkModules(index uint32, visited map[uint32]bool, modules []LinkModule) []LinkModule {
 	if visited[index] {
@@ -166,54 +234,12 @@ func linkModules(index uint32, visited map[uint32]bool, modules []LinkModule) []
 		panic(fmt.Sprintf("css module not process: %d", index))
 	}
 	modules = append(modules, LinkModule{
-		moduleId: entry.InputFile.Source.KeyPath.Text,
-		content:  entry.Output,
+		sourceIndex:    entry.InputFile.Source.Index,
+		moduleId:       entry.InputFile.Source.KeyPath.Text,
+		content:        entry.Output,
+		sourcemapChunk: entry.SourceMapChunk,
 	})
 	return modules
-}
-
-func generateInitialModule(log logger.Log, entrySource logger.Source) logger.Source {
-	entryModuleId := entrySource.KeyPath.Text
-	source := logger.Source{
-		Index: ^uint32(0) - entrySource.Index,
-		KeyPath: logger.Path{
-			Text: fmt.Sprintf("<initial_module_%d>", entrySource.Index),
-		},
-		Contents: `
-			require("<dev_client>")
-			require("<react_refresh_runtime>")
-			require("` + entryModuleId + `")
-		`,
-	}
-	moduleAST, _ := js_parser.Parse(log, source, js_parser.Options{})
-	moduleAST.ImportRecords = append(moduleAST.ImportRecords, ast.ImportRecord{
-		Kind:        ast.PackRequire,
-		Path:        hmr.DevClientPath,
-		SourceIndex: ast.MakeIndex32(runtimeSourceCache[hmr.DevClientPath.Text]),
-	},
-		ast.ImportRecord{
-			Kind:        ast.PackRequire,
-			Path:        hmr.ReactRefreshRuntimePath,
-			SourceIndex: ast.MakeIndex32(runtimeSourceCache[hmr.ReactRefreshRuntimePath.Text]),
-		},
-		ast.ImportRecord{
-			Kind:        ast.PackRequire,
-			SourceIndex: ast.MakeIndex32(entrySource.Index),
-			Path:        entrySource.KeyPath,
-		})
-
-	symbolMap := generateNewSymbolMap(source, &moduleAST)
-	context := NewModuleTransformerContext(log, source, symbolMap, []*resolver.ResolveResult{}, runtimeSourceCache, &moduleAST, buildOptions)
-	moduleFileCache[source.Index] = &StreamInputFileCacheEntry{
-		InputFile: graph.InputFile{
-			Source: source,
-			Repr: &graph.JSRepr{
-				AST: moduleAST,
-			},
-		},
-		Output: context.transformESMToCJS().JS,
-	}
-	return source
 }
 
 func transformCSSToJSModule(log logger.Log, source logger.Source, imports string, content string, media string, resolveRsults []*resolver.ResolveResult) string {
@@ -509,8 +535,11 @@ type Manifest struct {
 }
 
 type LinkModule struct {
-	moduleId string
-	content  string
+	sourceIndex     uint32
+	moduleId        string
+	content         string
+	generatedOffset sourcemap.LineColumnOffset
+	sourcemapChunk  sourcemap.Chunk
 }
 
 func init() {
@@ -601,6 +630,7 @@ loop:
 					} else {
 						symbolMap = generateNewSymbolMap(file.InputFile.Source, ast)
 					}
+
 					context := NewModuleTransformerContext(log, file.InputFile.Source, symbolMap, file.ResolveResults, runtimeSourceCache, ast, buildOptions)
 					var result ModuleTransformResult
 					if repr.AST.HasLazyExport {
@@ -617,10 +647,10 @@ loop:
 					// repr.AST.Parts = []js_ast.Part{}
 					// repr.AST.ModuleScope = nil
 					moduleFileCache[file.InputFile.Source.Index] = &StreamInputFileCacheEntry{
-						InputFile:     file.InputFile,
-						Output:        result.JS,
-						ResolveRsults: file.ResolveResults,
-						SourceMap:     result.SourceMap,
+						InputFile:      file.InputFile,
+						Output:         result.JS,
+						ResolveRsults:  file.ResolveResults,
+						SourceMapChunk: result.SourceMapChunk,
 					}
 
 					if currentHash != "" {
@@ -676,22 +706,133 @@ loop:
 		processCSSModules(log, entry.SourceIndex, visitedModules)
 
 		visitedModules = make(map[uint32]bool)
-		initialModuleSource := generateInitialModule(log, moduleFileCache[entry.SourceIndex].InputFile.Source)
+		initialModuleSource := generateInitialModuleSource(log, moduleFileCache[entry.SourceIndex].InputFile.Source)
 
 		runtimeSource := runtime.GeneratePackSource(js_ast.MakeDynamicIndex(), manifest.H)
+		runtimeModule := generateRuntimeModule(log, runtimeSource)
 
+		modules = append(modules, runtimeModule)
 		modules = linkModules(initialModuleSource.Index, visitedModules, modules)
 
 		output := helpers.Joiner{}
-		output.AddString(runtimeSource.Contents)
+		sourcemapOutput := helpers.Joiner{}
+		sourceIndexToSourcesIndex := make(map[uint32]int)
+		prevOffset := sourcemap.LineColumnOffset{}
 
+		// output.AddString(runtimeSource.Contents)
+		// prevOffset.AdvanceString(runtimeSource.Contents)
+		nextSourcesIndex := 0
+		// modules = modules[:2]
 		for i, module := range modules {
+			// 用在合并sourcemap时需要重定位
+			if _, ok := sourceIndexToSourcesIndex[module.sourceIndex]; !ok {
+				sourceIndexToSourcesIndex[module.sourceIndex] = nextSourcesIndex
+				nextSourcesIndex++
+			}
+			modules[i].generatedOffset = prevOffset
+			if module.sourceIndex == runtimeSource.Index {
+				output.AddString(module.content)
+				output.AddString(";\n")
+				prevOffset = sourcemap.LineColumnOffset{}
+				// prevOffset.AdvanceString(";\n")
+				continue
+			}
+			var code string
+			// fmt.Println(module.content)
 			if i == len(modules)-1 {
-				output.AddString(generatePackCode(chunkId, module.moduleId, module.content, []string{module.moduleId}))
+				code, prevOffset = generatePackCode(chunkId, &modules[i], []string{module.moduleId})
+				output.AddString(code)
 			} else {
-				output.AddString(generatePackCode(chunkId, module.moduleId, module.content, make([]string, 0)))
+				code, prevOffset = generatePackCode(chunkId, &modules[i], make([]string, 0))
+				output.AddString(code)
 			}
 		}
+		fmt.Println(string(helpers.QuoteForJSON(moduleFileCache[modules[1].sourceIndex].InputFile.Source.Contents, true)))
+		fmt.Println(modules[1].content)
+		fmt.Println(string(modules[1].sourcemapChunk.Buffer.Data))
+
+		sourcemapOutput.AddString("{\n  \"version\": 3")
+		sourcemapOutput.AddString(",\n  \"sources\": [")
+
+		for i, module := range modules {
+			if i != 0 {
+				sourcemapOutput.AddString(", ")
+			}
+			sourcemapOutput.AddBytes(helpers.QuoteForJSON(module.moduleId, options.ASCIIOnly))
+		}
+
+		sourcemapOutput.AddString("]")
+		if options.SourceRoot != "" {
+			sourcemapOutput.AddString(",\n  \"sourceRoot\": ")
+			sourcemapOutput.AddBytes(helpers.QuoteForJSON(options.SourceRoot, options.ASCIIOnly))
+		}
+
+		if !options.ExcludeSourcesContent {
+			sourcemapOutput.AddString(",\n  \"sourcesContent\": [")
+			for i, module := range modules {
+				if i != 0 {
+					sourcemapOutput.AddString(", ")
+				}
+				sourcemapOutput.AddBytes(helpers.QuoteForJSON(moduleFileCache[module.sourceIndex].InputFile.Source.Contents, options.ASCIIOnly))
+			}
+			sourcemapOutput.AddString("]")
+		}
+
+		sourcemapOutput.AddString(",\n  \"mappings\": \"")
+		// mappingsStart := sourcemapOutput.Length()
+		prevEndState := sourcemap.SourceMapState{}
+		prevColumnOffset := 0
+		totalQuotedNameLen := 0
+		// 主要考虑生成代码是一行还是多行的
+		for _, module := range modules {
+			offset := module.generatedOffset
+			startState := sourcemap.SourceMapState{
+				SourceIndex:     sourceIndexToSourcesIndex[module.sourceIndex],
+				GeneratedLine:   offset.Lines,
+				GeneratedColumn: offset.Columns,
+				OriginalName:    totalQuotedNameLen,
+			}
+			if offset.Lines == 0 {
+				startState.GeneratedColumn += prevColumnOffset
+			}
+
+			// if strings.Contains(module.moduleId, "index.tsx") {
+			// 	fmt.Println(module.content)
+			// 	fmt.Println(string(helpers.QuoteForJSON(moduleFileCache[module.sourceIndex].InputFile.Source.Contents, true)))
+			// 	fmt.Println(string(module.sourcemapChunk.Buffer.Data))
+			// }
+			fmt.Printf("souceIndex: %d, prev_lines: %d, origin_lines: %d\n", startState.SourceIndex, module.generatedOffset.Lines, module.sourcemapChunk.EndState.OriginalLine)
+			sourcemap.AppendSourceMapChunk(&sourcemapOutput, prevEndState, startState, module.sourcemapChunk.Buffer)
+			// 因为后面的sourcemap需要减去前面的数量，因为所有位置都是用相对位置来实现的
+			prevEndState = module.sourcemapChunk.EndState
+			prevEndState.SourceIndex += startState.SourceIndex
+			// 就是生成代码的最后一行column偏移
+			prevColumnOffset = module.sourcemapChunk.FinalGeneratedColumn
+
+			totalQuotedNameLen += len(module.sourcemapChunk.QuotedNames)
+
+			if prevEndState.GeneratedLine == 0 {
+				prevEndState.GeneratedColumn += startState.GeneratedColumn
+				prevColumnOffset += startState.GeneratedColumn
+			}
+		}
+
+		// mappingsEnd := sourcemapOutput.Length()
+		sourcemapOutput.AddString("\",\n  \"names\": [")
+		isFirstName := true
+		for _, module := range modules {
+			for _, quotedName := range module.sourcemapChunk.QuotedNames {
+				if isFirstName {
+					isFirstName = false
+				} else {
+					sourcemapOutput.AddString(", ")
+				}
+				sourcemapOutput.AddBytes(quotedName)
+			}
+		}
+		sourcemapOutput.AddString("]")
+
+		sourcemapOutput.AddString("\n}\n")
 
 		if currentHash != "" {
 			hotData := generateHotCode(chunkId, visitedModules, chunkModuleCache[chunkId])
@@ -714,10 +855,17 @@ loop:
 		} else {
 			ext = ".js"
 		}
+		output.AddString("//# sourceMappingURL=" + entry.OutputPath + ext + ".map")
 		results = append(results, graph.OutputFile{
 			AbsPath:  path.Join(options.AbsOutputDir, entry.OutputPath+ext),
 			Contents: output.Done(),
 		})
+
+		results = append(results, graph.OutputFile{
+			AbsPath:  path.Join(options.AbsOutputDir, entry.OutputPath+ext+".map"),
+			Contents: sourcemapOutput.Done(),
+		})
+
 		var empty = func() string {
 			return ""
 		}
