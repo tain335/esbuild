@@ -278,11 +278,15 @@ Step 1
 Step 2
 1. 重构js_ast遍历
 2. 优化增量更新逻辑，目标在200ms
-3. 使用fsnotify替换原本的watcher
+3. 使用fsnotify替换原本的watcher // done
 4. ejs插件
 5. source_map // doing
+	* 初步支持 // done
+	* input source map支持
 6. tree shaking效果对比
 7. stream link降低开发时内存消耗 // doing
+8. 重构steam link
+9. 整合stream link和link和加强插件机制
 目标：能够使用espack开发项目
 
 Step 3
@@ -293,6 +297,7 @@ Step 3
 Step 4
 1. 添加打包数据输出
 2. 新的数据分析页面
+
 目标：能够高效分析页面模块依赖关系
 
 
