@@ -308,7 +308,7 @@ func main() {
 				InputPath: "./app/index.tsx",
 			},
 		},
-		Outdir:      "test/build",
+		Outdir:      "build",
 		Write:       true,
 		Bundle:      true,
 		TreeShaking: esbuild.TreeShakingFalse,
