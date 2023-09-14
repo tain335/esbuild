@@ -517,7 +517,7 @@ type BuildContext interface {
 	Rebuild() BuildResult
 	Watch(options WatchOptions) error
 	Serve(options ServeOptions) (ServeResult, error)
-	DevServe(options DevServeOptions) (ServeResult, error)
+	DevServe(options DevServeOptions) (*DevServer, error)
 	Dispose()
 }
 

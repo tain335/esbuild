@@ -242,7 +242,7 @@ func linkModules(index uint32, visited map[uint32]bool, modules []LinkModule) []
 	return modules
 }
 
-func transformCSSToJSModule(log logger.Log, source logger.Source, imports string, content string, media string, resolveRsults []*resolver.ResolveResult) string {
+func transformCSSToJSModule(log logger.Log, source logger.Source, imports string, content string, media string, resolveRsults []*resolver.ResolveResult) ModuleTransformResult {
 	code := fmt.Sprintf(`
 	%s
 	var content = $$content$$;
@@ -265,11 +265,11 @@ func transformCSSToJSModule(log logger.Log, source logger.Source, imports string
 	moduleAst = combineParts(moduleAst)
 	symbolMap := generateNewSymbolMap(source, moduleAst)
 	context := NewModuleTransformerContext(log, source, symbolMap, resolveRsults, runtimeSourceCache, moduleAst, buildOptions)
-	return context.transformESMToCJS().JS
+	return context.transformESMToCJS()
 }
 
 // 因为每次导入就要执行一次，不同与js只运行一次，这里会复制一份新的文件模块
-func generateCSSModule(log logger.Log, source logger.Source, cssAst *css_ast.AST, resolveResults []*resolver.ResolveResult) string {
+func generateCSSModule(log logger.Log, source logger.Source, cssAst *css_ast.AST, resolveResults []*resolver.ResolveResult) ModuleTransformResult {
 	entry := moduleFileCache[source.Index]
 	var importStmts = []string{`import api from "<style_runtime>;"`}
 	newResolveResults := append([]*resolver.ResolveResult{},
@@ -386,9 +386,10 @@ func generateCSSModule(log logger.Log, source logger.Source, cssAst *css_ast.AST
 					Contents: content,
 				},
 			},
-			ResolveRsults: []*resolver.ResolveResult{resolveResult},
-			Output:        output,
-			CSSMedia:      media,
+			ResolveRsults:  []*resolver.ResolveResult{resolveResult},
+			Output:         output.JS,
+			SourceMapChunk: output.SourceMapChunk,
+			CSSMedia:       media,
 		}
 
 		newResolveResults = append(newResolveResults, resolveResult)
@@ -477,7 +478,8 @@ func processCSSModules(log logger.Log, index uint32, visited map[uint32]bool) {
 	switch repr := entry.InputFile.Repr.(type) {
 	case *graph.CSSRepr:
 		output := generateCSSModule(log, entry.InputFile.Source, &repr.AST, entry.ResolveRsults)
-		entry.Output = output
+		entry.Output = output.JS
+		entry.SourceMapChunk = output.SourceMapChunk
 		for _, record := range *repr.ImportRecords() {
 			if _, ok := resolver.ParseDataURL(record.Path.Text); !ok && record.SourceIndex.IsValid() {
 				processCSSModules(log, record.SourceIndex.GetIndex(), visited)
@@ -570,56 +572,6 @@ loop:
 			handleFile := func() {
 				switch repr := file.InputFile.Repr.(type) {
 				case *graph.JSRepr:
-					// mutex.Lock()
-					// if entry, ok := moduleFileCache[file.InputFile.Source.Index]; ok {
-					// 	if entry.InputFile.Source.Contents == file.InputFile.Source.Contents {
-					// 		mutex.Unlock()
-					// 		break
-					// 	}
-					// }
-					// mutex.Unlock()
-					// if file.InputFile.Source.Index != 0 {
-					// 	symbols := js_ast.NewSymbolMap()
-					// 	lineOffsetTable := sourcemap.GenerateLineOffsetTables(file.InputFile.Source.Contents, repr.AST.ApproximateLineCount)
-					// 	// quotedContents := helpers.QuoteForJSON(file.InputFile.Source.Contents, options.ASCIIOnly)
-					// 	// var fileSymbols = make([]js_ast.Symbol, 0)
-					// 	// fileSymbols = append(fileSymbols, moduleFileCache[0].InputFile.Repr.(*graph.JSRepr).AST.Symbols...)
-					// 	symbols.SymbolsForSource[0] = moduleFileCache[0].InputFile.Repr.(*graph.JSRepr).AST.Symbols
-					// 	symbols.SymbolsForSource[file.InputFile.Source.Index] = repr.AST.Symbols
-					// 	// moduleScopes := make([]*js_ast.Scope, 2)
-					// 	// moduleScopes[0] = moduleFileCache[0].InputFile.Repr.(*graph.JSRepr).AST.ModuleScope
-					// 	// moduleScopes[1] = repr.AST.ModuleScope
-					// 	// var firstTopLevelSlots js_ast.SlotCounts
-					// 	// firstTopLevelSlots.UnionMax(moduleFileCache[0].InputFile.Repr.(*graph.JSRepr).AST.NestedScopeSlotCounts)
-					// 	// firstTopLevelSlots.UnionMax(repr.AST.NestedScopeSlotCounts)
-					// 	// reservedNames := renamer.ComputeReservedNames(moduleScopes, symbols)
-					// 	// // var m = make(map[string]uint32, 0)
-					// 	// r := renamer.NewMinifyRenamer(symbols, firstTopLevelSlots, reservedNames)
-					// 	// freq := js_ast.CharFreq{}
-					// 	// freq.Include(moduleFileCache[0].InputFile.Repr.(*graph.JSRepr).AST.CharFreq)
-					// 	// freq.Include(repr.AST.CharFreq)
-					// 	// minifier := freq.Compile()
-					// 	// r.AssignNamesByFrequency(&minifier)
-					// 	r := renamer.NewNoOpRenamer(symbols)
-					// 	result := js_printer.Print(repr.AST, symbols, r, js_printer.Options{
-					// 		SourceMap:         config.SourceMapInline,
-					// 		AddSourceMappings: true,
-					// 		OutputFormat:      config.FormatCommonJS,
-					// 		LineOffsetTables:  lineOffsetTable,
-					// 		RequireOrImportMetaForSource: func(u uint32) (meta js_printer.RequireOrImportMeta) {
-					// 			return
-					// 		},
-					// 	})
-
-					// 	// spew.Dump(quotedContents)
-					// 	spew.Dump(string(result.JS))
-					// 	spew.Dump("result.SourceMapChunk.QuotedNames", result.SourceMapChunk.QuotedNames)
-					// 	spew.Dump(string(result.SourceMapChunk.Buffer.Data))
-					// }
-
-					// fileSymbols := append([]js_ast.Symbol{}, repr.AST.Symbols...)
-					// symbolMap.SymbolsForSource[file.InputFile.Source.Index] = fileSymbols
-
 					var ast *js_ast.AST = &repr.AST
 					var symbolMap *js_ast.SymbolMap
 					if file.InputFile.Source.Index == 0 {
@@ -642,10 +594,7 @@ loop:
 					repr.AST = js_ast.AST{
 						ImportRecords: *repr.ImportRecords(),
 					}
-					// file.InputFile.Source.Contents = ""
-					// file.InputFile.InputSourceMap = nil
-					// repr.AST.Parts = []js_ast.Part{}
-					// repr.AST.ModuleScope = nil
+
 					moduleFileCache[file.InputFile.Source.Index] = &StreamInputFileCacheEntry{
 						InputFile:      file.InputFile,
 						Output:         result.JS,
@@ -719,10 +668,7 @@ loop:
 		sourceIndexToSourcesIndex := make(map[uint32]int)
 		prevOffset := sourcemap.LineColumnOffset{}
 
-		// output.AddString(runtimeSource.Contents)
-		// prevOffset.AdvanceString(runtimeSource.Contents)
 		nextSourcesIndex := 0
-		// modules = modules[:2]
 		for i, module := range modules {
 			// 用在合并sourcemap时需要重定位
 			if _, ok := sourceIndexToSourcesIndex[module.sourceIndex]; !ok {
@@ -734,11 +680,9 @@ loop:
 				output.AddString(module.content)
 				output.AddString(";\n")
 				prevOffset = sourcemap.LineColumnOffset{}
-				// prevOffset.AdvanceString(";\n")
 				continue
 			}
 			var code string
-			// fmt.Println(module.content)
 			if i == len(modules)-1 {
 				code, prevOffset = generatePackCode(chunkId, &modules[i], []string{module.moduleId})
 				output.AddString(code)
@@ -747,9 +691,9 @@ loop:
 				output.AddString(code)
 			}
 		}
-		fmt.Println(string(helpers.QuoteForJSON(moduleFileCache[modules[1].sourceIndex].InputFile.Source.Contents, true)))
-		fmt.Println(modules[1].content)
-		fmt.Println(string(modules[1].sourcemapChunk.Buffer.Data))
+		// fmt.Println(string(helpers.QuoteForJSON(moduleFileCache[modules[1].sourceIndex].InputFile.Source.Contents, true)))
+		// fmt.Println(modules[1].content)
+		// fmt.Println(string(modules[1].sourcemapChunk.Buffer.Data))
 
 		sourcemapOutput.AddString("{\n  \"version\": 3")
 		sourcemapOutput.AddString(",\n  \"sources\": [")
@@ -795,13 +739,8 @@ loop:
 			if offset.Lines == 0 {
 				startState.GeneratedColumn += prevColumnOffset
 			}
-
-			// if strings.Contains(module.moduleId, "index.tsx") {
-			// 	fmt.Println(module.content)
-			// 	fmt.Println(string(helpers.QuoteForJSON(moduleFileCache[module.sourceIndex].InputFile.Source.Contents, true)))
-			// 	fmt.Println(string(module.sourcemapChunk.Buffer.Data))
-			// }
-			fmt.Printf("souceIndex: %d, prev_lines: %d, origin_lines: %d\n", startState.SourceIndex, module.generatedOffset.Lines, module.sourcemapChunk.EndState.OriginalLine)
+			// fmt.Println(moduleFileCache[module.sourceIndex].InputFile.Source.KeyPath.Text)
+			// fmt.Printf("souceIndex: %d, prev_lines: %d, origin_lines: %d\n", startState.SourceIndex, module.generatedOffset.Lines, module.sourcemapChunk.EndState.OriginalLine)
 			sourcemap.AppendSourceMapChunk(&sourcemapOutput, prevEndState, startState, module.sourcemapChunk.Buffer)
 			// 因为后面的sourcemap需要减去前面的数量，因为所有位置都是用相对位置来实现的
 			prevEndState = module.sourcemapChunk.EndState
@@ -817,7 +756,6 @@ loop:
 			}
 		}
 
-		// mappingsEnd := sourcemapOutput.Length()
 		sourcemapOutput.AddString("\",\n  \"names\": [")
 		isFirstName := true
 		for _, module := range modules {
@@ -895,6 +833,7 @@ loop:
 
 	currentHash = manifest.H
 	timer.End("Stream link")
+
 	log.AddMsg(logger.Msg{
 		Kind: logger.Info,
 		Data: logger.MsgData{

@@ -2,7 +2,6 @@ package sourcemap
 
 import (
 	"bytes"
-	"fmt"
 	"unicode/utf8"
 
 	"github.com/evanw/esbuild/internal/ast"
@@ -440,7 +439,7 @@ func AppendSourceMapChunk(j *helpers.Joiner, prevEndState SourceMapState, startS
 	startState.OriginalLine += originalLine
 	startState.OriginalColumn += originalColumn
 	prevEndState.HasOriginalName = false // This is handled separately below
-	fmt.Printf("encode: source_index: %d, generate_column: %d, line: %d\n", startState.SourceIndex-prevEndState.SourceIndex, startState.GeneratedColumn-prevEndState.GeneratedColumn, startState.OriginalLine-prevEndState.OriginalLine)
+	// fmt.Printf("encode: source_index: %d, generate_column: %d, line: %d\n", startState.SourceIndex-prevEndState.SourceIndex, startState.GeneratedColumn-prevEndState.GeneratedColumn, startState.OriginalLine-prevEndState.OriginalLine)
 	rewritten, _ := appendMappingToBuffer(nil, j.LastByte(), prevEndState, startState)
 	j.AddBytes(rewritten)
 
