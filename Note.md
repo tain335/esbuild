@@ -279,14 +279,21 @@ Step 2
 1. 重构js_ast遍历
 2. 优化增量更新逻辑，目标在200ms
 3. 使用fsnotify替换原本的watcher // done
-4. ejs插件
+4. html模版插件
+	* 采用golang模版语法
 5. source_map // doing
 	* 初步支持 // done
 	* input source map支持
 6. tree shaking效果对比
 7. stream link降低开发时内存消耗 // doing
 8. 重构stream link
+ * 思考能不能并行link，采用信号机制，通过定义方法获取内容，若不存在则等待
 9. 整合stream link和link和加强插件机制
+10. test用例 // doing
+	* 补充用例
+11. 重构dev server
+	* 初步完成 // done
+	* 需要一个统一的配置入口，代替原来的，简化整个配置流程
 目标：能够使用espack开发项目
 
 Step 3

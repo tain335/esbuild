@@ -84,7 +84,7 @@ func NewDevServer(ctx *internalContext, host string, port uint32, timeout time.D
 	}
 }
 
-func (d *DevServer) Run() {
+func (d *DevServer) Run(exitOnBuild bool) {
 	d.server = &http.Server{
 		Addr: fmt.Sprintf("%s:%d", d.Host, d.Port),
 	}
@@ -116,7 +116,10 @@ func (d *DevServer) Run() {
 	}()
 
 	d.runBuilder()
-
+	if exitOnBuild {
+		d.disposeInternal()
+		return
+	}
 	signal.Notify(d.closeChannel, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	<-d.closeChannel
 	d.disposeInternal()

@@ -1,8 +1,6 @@
 package main
 
 import (
-	"fmt"
-
 	esbuild "github.com/evanw/esbuild/pkg/api"
 )
 
@@ -61,6 +59,5 @@ func main() {
 	if e != nil {
 		panic(e)
 	}
-	fmt.Printf("espack running at %s:%d\n", server.Host, server.Port)
-	server.Run()
+	server.Run(true)
 }
