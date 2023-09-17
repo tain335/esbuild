@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -248,8 +249,11 @@ func (d *DevServer) onBuild(br BuildResult) {
 			for _, file := range br.OutputFiles {
 				size, unit := formatFileSize(len(file.Contents))
 				outputMsg += fmt.Sprintf("\t%s %.2f%s\n", path.Base(file.Path), size, unit)
-
-				err := os.WriteFile(file.Path, file.Contents, 0644)
+				err := os.MkdirAll(filepath.Dir(file.Path), 0777)
+				if err != nil {
+					logger.Errorf("err: %s", err.Error())
+				}
+				err = os.WriteFile(file.Path, file.Contents, 0644)
 				if err != nil {
 					logger.Errorf("err: %s", err.Error())
 				}

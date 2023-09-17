@@ -8,7 +8,7 @@ func main() {
 	context, err := esbuild.Context(esbuild.BuildOptions{
 		EntryPointsAdvanced: []esbuild.EntryPoint{
 			{
-				InputPath: "./app/index.tsx",
+				InputPath: "./src/index.tsx",
 			},
 		},
 		Outdir:      "build",
@@ -40,9 +40,6 @@ func main() {
 			".jpeg": esbuild.LoaderBase64,
 			".svg":  esbuild.LoaderBase64,
 		},
-		// Plugins: []esbuild.Plugin{
-		// 	SassLoaderPlugin(),
-		// },
 		// LogLevel:       esbuild.LogLevelError,
 		Format:         esbuild.FormatCommonJS, //非常重要 如果是esm模式输出会require重写__require
 		AllowOverwrite: true,

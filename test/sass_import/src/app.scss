@@ -1,0 +1,13 @@
+@import "./style/module_a.scss";
+@import "sass_module/node_module_sass_mod.scss";
+
+body {
+  background: red;
+}
+
+$nav-color: #F90;
+nav {
+  $width: 100px;
+  width: $width;
+  color: $nav-color;
+}

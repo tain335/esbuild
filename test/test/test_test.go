@@ -9,6 +9,10 @@ func TestSourcemap(t *testing.T) {
 	execUserCase("sourcemap", t)
 }
 
+func TestSassImport(t *testing.T) {
+	execUserCase("sass_import", t)
+}
+
 func execUserCase(userCase string, t *testing.T) {
 	modTidy := exec.Command("go", "mod", "tidy")
 	run := exec.Command("go", "run", "main.go")
