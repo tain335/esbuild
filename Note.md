@@ -304,6 +304,10 @@ Step 3
 Step 4
 1. 添加打包数据输出
 2. 新的数据分析页面
+	* 生成引用图，快速查询模块依赖路径
+	* 找出相似模块，或者内容相似的文件
+	* 找出项目没有引用文件
+	* 找出文件中没有引用的类或者函数
 
 目标：能够高效分析页面模块依赖关系
 
@@ -314,7 +318,7 @@ compile 384ms
 disable cache情况下
 	初始刷新（因为初始刷新才开始编译，所以耗时高）
 		first-paint 3883ms
-		first-contentful-paint 3883
+		first-contentful-paint 3883ms
 	二次刷新
 		first-paint 1882ms
 		first-contentful-paint 1882ms

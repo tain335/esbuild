@@ -41,6 +41,15 @@ type StreamInputFileCacheEntry struct {
 	CSSClones   []uint32
 }
 
+func isASCIIOnly(text string) bool {
+	for _, c := range text {
+		if c < 0x20 || c > 0x7E {
+			return false
+		}
+	}
+	return true
+}
+
 func generatePackCode(chunkId string, module *LinkModule, execArray []string) (string, sourcemap.LineColumnOffset) {
 	var execCode string
 	if len(execArray) > 0 {
@@ -59,7 +68,6 @@ func generatePackCode(chunkId string, module *LinkModule, execArray []string) (s
 	j.AddString(packCodePost)
 
 	nextGenerateOffset := sourcemap.LineColumnOffset{}
-	// nextGenerateOffset.AdvanceString(packCodePost)
 	return string(j.Done()), nextGenerateOffset
 }
 
@@ -167,7 +175,7 @@ func generateInitialModuleSource(log logger.Log, entrySource logger.Source) logg
 		})
 
 	symbolMap := generateNewSymbolMap(source, &moduleAST)
-	context := NewModuleTransformerContext(log, source, symbolMap, []*resolver.ResolveResult{}, runtimeSourceCache, &moduleAST, buildOptions)
+	context := NewModuleTransformerContext(log, source, symbolMap, []*resolver.ResolveResult{}, nil, runtimeSourceCache, &moduleAST, buildOptions)
 	result := context.transformESMToCJS()
 	moduleFileCache[source.Index] = &StreamInputFileCacheEntry{
 		InputFile: graph.InputFile{
@@ -185,7 +193,7 @@ func generateInitialModuleSource(log logger.Log, entrySource logger.Source) logg
 func generateRuntimeModule(log logger.Log, source logger.Source) LinkModule {
 	if moduleAST, ok := js_parser.Parse(log, source, js_parser.Options{}); ok {
 		symbolMap := generateNewSymbolMap(source, &moduleAST)
-		context := NewModuleTransformerContext(log, source, symbolMap, []*resolver.ResolveResult{}, runtimeSourceCache, &moduleAST, buildOptions)
+		context := NewModuleTransformerContext(log, source, symbolMap, []*resolver.ResolveResult{}, nil, runtimeSourceCache, &moduleAST, buildOptions)
 		result := context.output(false)
 		moduleFileCache[source.Index] = &StreamInputFileCacheEntry{
 			InputFile: graph.InputFile{
@@ -264,7 +272,7 @@ func transformCSSToJSModule(log logger.Log, source logger.Source, imports string
 
 	moduleAst = combineParts(moduleAst)
 	symbolMap := generateNewSymbolMap(source, moduleAst)
-	context := NewModuleTransformerContext(log, source, symbolMap, resolveRsults, runtimeSourceCache, moduleAst, buildOptions)
+	context := NewModuleTransformerContext(log, source, symbolMap, resolveRsults, nil, runtimeSourceCache, moduleAst, buildOptions)
 	return context.transformESMToCJS()
 }
 
@@ -522,7 +530,6 @@ var mutex sync.Mutex
 var moduleFileCache = make(map[uint32]*StreamInputFileCacheEntry)
 var chunkModuleCache = make(map[string]map[uint32]bool)
 var runtimeSourceCache = make(map[string]uint32)
-var runtimeCacheMutex sync.Mutex
 
 var needReleaseModules = make([]uint32, 0)
 var needUpdateModules = make([]uint32, 0)
@@ -548,6 +555,11 @@ func init() {
 	runtimeSourceCache[hmr.DevClientPath.Text] = 0
 	runtimeSourceCache[hmr.StyleRuntimePath.Text] = 0
 	runtimeSourceCache[hmr.ReactRefreshRuntimePath.Text] = 0
+}
+
+type SourcemapItem struct {
+	Path     string
+	Contents []byte
 }
 
 func StreamLinker(
@@ -583,7 +595,7 @@ loop:
 						symbolMap = generateNewSymbolMap(file.InputFile.Source, ast)
 					}
 
-					context := NewModuleTransformerContext(log, file.InputFile.Source, symbolMap, file.ResolveResults, runtimeSourceCache, ast, buildOptions)
+					context := NewModuleTransformerContext(log, file.InputFile.Source, symbolMap, file.ResolveResults, file.InputFile.InputSourceMap, runtimeSourceCache, ast, buildOptions)
 					var result ModuleTransformResult
 					if repr.AST.HasLazyExport {
 						result = context.transformOtherToCJS()
@@ -668,41 +680,66 @@ loop:
 		sourceIndexToSourcesIndex := make(map[uint32]int)
 		prevOffset := sourcemap.LineColumnOffset{}
 
+		sourmapItems := make([]SourcemapItem, 0, len(modules))
+
 		nextSourcesIndex := 0
-		for i, module := range modules {
-			// 用在合并sourcemap时需要重定位
-			if _, ok := sourceIndexToSourcesIndex[module.sourceIndex]; !ok {
-				sourceIndexToSourcesIndex[module.sourceIndex] = nextSourcesIndex
+		for i := range modules {
+			module := &modules[i]
+			sourceIndexToSourcesIndex[module.sourceIndex] = nextSourcesIndex
+			sm := moduleFileCache[module.sourceIndex].InputFile.InputSourceMap
+			if sm != nil {
+				for i := range sm.Sources {
+					source := sm.Sources[i]
+					value := sm.SourcesContent[i]
+					// ASCIIOnly 内容只有ASCII字符
+					if value.Quoted != "" && (!options.ASCIIOnly || !isASCIIOnly(value.Quoted)) {
+						sourmapItems = append(sourmapItems, SourcemapItem{
+							Path:     source,
+							Contents: []byte(sm.SourcesContent[i].Quoted),
+						})
+					} else {
+						sourmapItems = append(sourmapItems, SourcemapItem{
+							Path:     source,
+							Contents: helpers.QuoteForJSON(helpers.UTF16ToString(value.Value), options.ASCIIOnly),
+						})
+					}
+				}
+				nextSourcesIndex += len(sm.Sources)
+			} else {
+				contents := moduleFileCache[module.sourceIndex].InputFile.Source.Contents
+				sourmapItems = append(sourmapItems, SourcemapItem{
+					Path:     module.moduleId,
+					Contents: helpers.QuoteForJSON(contents, options.ASCIIOnly),
+				})
 				nextSourcesIndex++
 			}
-			modules[i].generatedOffset = prevOffset
+
+			module.generatedOffset = prevOffset
 			if module.sourceIndex == runtimeSource.Index {
 				output.AddString(module.content)
 				output.AddString(";\n")
 				prevOffset = sourcemap.LineColumnOffset{}
 				continue
 			}
+
 			var code string
 			if i == len(modules)-1 {
-				code, prevOffset = generatePackCode(chunkId, &modules[i], []string{module.moduleId})
+				code, prevOffset = generatePackCode(chunkId, module, []string{module.moduleId})
 				output.AddString(code)
 			} else {
-				code, prevOffset = generatePackCode(chunkId, &modules[i], make([]string, 0))
+				code, prevOffset = generatePackCode(chunkId, module, []string{})
 				output.AddString(code)
 			}
 		}
-		// fmt.Println(string(helpers.QuoteForJSON(moduleFileCache[modules[1].sourceIndex].InputFile.Source.Contents, true)))
-		// fmt.Println(modules[1].content)
-		// fmt.Println(string(modules[1].sourcemapChunk.Buffer.Data))
 
 		sourcemapOutput.AddString("{\n  \"version\": 3")
 		sourcemapOutput.AddString(",\n  \"sources\": [")
 
-		for i, module := range modules {
+		for i, item := range sourmapItems {
 			if i != 0 {
 				sourcemapOutput.AddString(", ")
 			}
-			sourcemapOutput.AddBytes(helpers.QuoteForJSON(module.moduleId, options.ASCIIOnly))
+			sourcemapOutput.AddBytes(helpers.QuoteForJSON(item.Path, options.ASCIIOnly))
 		}
 
 		sourcemapOutput.AddString("]")
@@ -713,17 +750,16 @@ loop:
 
 		if !options.ExcludeSourcesContent {
 			sourcemapOutput.AddString(",\n  \"sourcesContent\": [")
-			for i, module := range modules {
+			for i, item := range sourmapItems {
 				if i != 0 {
 					sourcemapOutput.AddString(", ")
 				}
-				sourcemapOutput.AddBytes(helpers.QuoteForJSON(moduleFileCache[module.sourceIndex].InputFile.Source.Contents, options.ASCIIOnly))
+				sourcemapOutput.AddBytes(item.Contents)
 			}
 			sourcemapOutput.AddString("]")
 		}
 
 		sourcemapOutput.AddString(",\n  \"mappings\": \"")
-		// mappingsStart := sourcemapOutput.Length()
 		prevEndState := sourcemap.SourceMapState{}
 		prevColumnOffset := 0
 		totalQuotedNameLen := 0
@@ -739,8 +775,6 @@ loop:
 			if offset.Lines == 0 {
 				startState.GeneratedColumn += prevColumnOffset
 			}
-			// fmt.Println(moduleFileCache[module.sourceIndex].InputFile.Source.KeyPath.Text)
-			// fmt.Printf("souceIndex: %d, prev_lines: %d, origin_lines: %d\n", startState.SourceIndex, module.generatedOffset.Lines, module.sourcemapChunk.EndState.OriginalLine)
 			sourcemap.AppendSourceMapChunk(&sourcemapOutput, prevEndState, startState, module.sourcemapChunk.Buffer)
 			// 因为后面的sourcemap需要减去前面的数量，因为所有位置都是用相对位置来实现的
 			prevEndState = module.sourcemapChunk.EndState

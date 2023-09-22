@@ -196,7 +196,6 @@ func (s *scanner) scanAllDependenciesByStream(runtimeResults []parseResult, file
 		}
 
 		s.caches.JSCache.Clear(result.file.inputFile.Source.KeyPath)
-		//s.fs.ClearPath(result.file.inputFile.Source.KeyPath.Text)
 		s.results[result.file.inputFile.Source.Index] = result
 		fileChannel <- streamlinker.StremInputFile{
 			InputFile:      result.file.inputFile,

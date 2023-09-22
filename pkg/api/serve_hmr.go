@@ -85,7 +85,7 @@ func NewDevServer(ctx *internalContext, host string, port uint32, timeout time.D
 	}
 }
 
-func (d *DevServer) Run(exitOnBuild bool) {
+func (d *DevServer) Run(keepRunning bool) {
 	d.server = &http.Server{
 		Addr: fmt.Sprintf("%s:%d", d.Host, d.Port),
 	}
@@ -117,7 +117,7 @@ func (d *DevServer) Run(exitOnBuild bool) {
 	}()
 
 	d.runBuilder()
-	if exitOnBuild {
+	if !keepRunning {
 		d.disposeInternal()
 		return
 	}

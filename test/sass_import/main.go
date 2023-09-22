@@ -60,5 +60,5 @@ func main() {
 	if e != nil {
 		panic(e)
 	}
-	server.Run(true)
+	server.Run(false)
 }

@@ -50,12 +50,13 @@ type ModuleTransformerContext struct {
 	tailStmts                   []js_ast.Stmt
 	resolveResult               []*resolver.ResolveResult
 	symbols                     *js_ast.SymbolMap
-	renameIdentifierExportCache map[js_ast.Ref]js_ast.Expr
+	renameIdentifierExportCache map[js_ast.Ref]func(loc logger.Loc) js_ast.Expr
 	reactComponentOrHooks       map[logger.Loc]*ModuleReactSignature
 	runtimeSourceCache          map[string]uint32
 	moduleRef                   js_ast.Ref
 	exportsRef                  js_ast.Ref
 	requireRef                  js_ast.Ref
+	inputSourceMap              *sourcemap.SourceMap
 	options                     *config.Options
 }
 
@@ -69,6 +70,7 @@ func NewModuleTransformerContext(
 	source logger.Source,
 	symbols *js_ast.SymbolMap,
 	resolveResult []*resolver.ResolveResult,
+	inputSourceMap *sourcemap.SourceMap,
 	runtimeSourceCache map[string]uint32,
 	ast *js_ast.AST,
 	options *config.Options,
@@ -83,7 +85,7 @@ func NewModuleTransformerContext(
 		headStmts:                   make([]js_ast.Stmt, 0),
 		tailStmts:                   make([]js_ast.Stmt, 0),
 		resolveResult:               resolveResult,
-		renameIdentifierExportCache: make(map[js_ast.Ref]js_ast.Expr),
+		renameIdentifierExportCache: make(map[js_ast.Ref]func(loc logger.Loc) js_ast.Expr),
 		reactComponentOrHooks:       make(map[logger.Loc]*ModuleReactSignature),
 		moduleRef:                   ast.ModuleRef,
 		exportsRef:                  ast.ExportsRef,
@@ -242,14 +244,19 @@ func (c *ModuleTransformerContext) transformImportStmt(s *js_ast.Stmt) {
 				},
 			})
 			newDefaultRef := c.generateNewSymbol(js_ast.SymbolHoisted, c.ast.Symbols[importStmt.DefaultName.Ref.InnerIndex].OriginalName)
-			c.renameIdentifierExportCache[defaultNameRef] = js_ast.Expr{
-				Data: &js_ast.ECall{
-					Target: js_ast.Expr{
-						Data: &js_ast.EIdentifier{
-							Ref: newDefaultRef,
+			c.renameIdentifierExportCache[defaultNameRef] = func(loc logger.Loc) js_ast.Expr {
+				return js_ast.Expr{
+					Loc: loc,
+					Data: &js_ast.ECall{
+						CloseParenLoc: loc,
+						Target: js_ast.Expr{
+							Loc: loc,
+							Data: &js_ast.EIdentifier{
+								Ref: newDefaultRef,
+							},
 						},
 					},
-				},
+				}
 			}
 		}
 		if importStmt.Items != nil {
@@ -261,15 +268,20 @@ func (c *ModuleTransformerContext) transformImportStmt(s *js_ast.Stmt) {
 				importModRef := c.generateNewSymbol(js_ast.SymbolHoisted, importModName)
 				// 解决循环引用模块问题
 				for _, item := range *s.Data.(*js_ast.SImport).Items {
-					c.renameIdentifierExportCache[item.Name.Ref] = js_ast.Expr{
-						Data: &js_ast.EDot{
-							Target: js_ast.Expr{
-								Data: &js_ast.EIdentifier{
-									Ref: importModRef,
+					c.renameIdentifierExportCache[item.Name.Ref] = func(loc logger.Loc) js_ast.Expr {
+						return js_ast.Expr{
+							Loc: loc,
+							Data: &js_ast.EDot{
+								NameLoc: loc,
+								Target: js_ast.Expr{
+									Loc: loc,
+									Data: &js_ast.EIdentifier{
+										Ref: importModRef,
+									},
 								},
+								Name: item.Alias,
 							},
-							Name: item.Alias,
-						},
+						}
 					}
 				}
 
@@ -363,12 +375,6 @@ func (c *ModuleTransformerContext) transformImportStmt(s *js_ast.Stmt) {
 						},
 					},
 				})
-
-				// c.tailStmts = append(c.tailStmts, js_ast.Stmt{
-				// 	Data: c.generateExportStmt(c.ast.ExportsRef, symbol.OriginalName, &js_ast.Expr{
-				// 		Data: expr,
-				// 	}),
-				// })
 			}
 		}
 		if importStmt.DefaultName == nil && importStmt.Items == nil && importStmt.NamespaceRef.SourceIndex == 0 {
@@ -392,7 +398,7 @@ func (c *ModuleTransformerContext) transformImportStmt(s *js_ast.Stmt) {
 func (c *ModuleTransformerContext) transformRenameExpr(e *js_ast.Expr) {
 	var tryToRename = func(ref js_ast.Ref, e *js_ast.Expr) {
 		if defaultExpr, ok := c.renameIdentifierExportCache[ref]; ok {
-			e.Data = defaultExpr.Data
+			*e = defaultExpr(e.Loc)
 		}
 	}
 	switch expr := e.Data.(type) {
@@ -652,7 +658,7 @@ func (c *ModuleTransformerContext) transformExportStmt(s *js_ast.Stmt) {
 				},
 			}
 			if e, ok := c.renameIdentifierExportCache[item.Name.Ref]; ok {
-				expr = e
+				expr = e(expr.Loc)
 			}
 			properties = append(properties, js_ast.Property{
 				Key: js_ast.Expr{
@@ -719,7 +725,7 @@ func (c *ModuleTransformerContext) computeReactSignautreKey(signature ModuleReac
 				}},
 			},
 		}
-		key += string(printJS(c.source, &newAst, c.symbols, c.options).JS)
+		key += string(printJS(c.source, &newAst, c.symbols, nil, c.options).JS)
 	}
 	hash := md5.Sum([]byte(key))
 	md5str := fmt.Sprintf("%x", hash)
@@ -990,7 +996,7 @@ func (c *ModuleTransformerContext) output(needWrapper bool) ModuleTransformResul
 	if needWrapper {
 		c.wrapCJS()
 	}
-	pr := printJS(c.source, c.ast, c.symbols, c.options)
+	pr := printJS(c.source, c.ast, c.symbols, c.inputSourceMap, c.options)
 	return ModuleTransformResult{
 		JS:             strings.TrimRight(string(pr.JS), ";\n"),
 		SourceMapChunk: pr.SourceMapChunk,

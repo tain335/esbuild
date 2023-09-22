@@ -52,7 +52,7 @@ func generateNewSymbol(symbols *js_ast.SymbolMap, ast *js_ast.AST, kind js_ast.S
 	return ref
 }
 
-func printJS(source logger.Source, ast *js_ast.AST, symbols *js_ast.SymbolMap, options *config.Options) js_printer.PrintResult {
+func printJS(source logger.Source, ast *js_ast.AST, symbols *js_ast.SymbolMap, inputSourceMap *sourcemap.SourceMap, options *config.Options) js_printer.PrintResult {
 	r := renamer.NewNoOpRenamer(*symbols)
 	lineOffsetTable := sourcemap.GenerateLineOffsetTables(source.Contents, ast.ApproximateLineCount)
 	return js_printer.Print(*ast, *symbols, r, js_printer.Options{
@@ -60,6 +60,7 @@ func printJS(source logger.Source, ast *js_ast.AST, symbols *js_ast.SymbolMap, o
 		AddSourceMappings:   options.SourceMap != config.SourceMapNone,
 		SourceMap:           options.SourceMap,
 		OutputFormat:        config.FormatCommonJS,
+		InputSourceMap:      inputSourceMap,
 		UnsupportedFeatures: options.UnsupportedJSFeatureOverrides,
 		RequireOrImportMetaForSource: func(u uint32) (meta js_printer.RequireOrImportMeta) {
 			return
