@@ -151,24 +151,29 @@ func (c *ModuleTransformerContext) registerReactSignature() {
 	}
 }
 
-func (c *ModuleTransformerContext) generateExportStmt(exportRef js_ast.Ref, name string, value *js_ast.Expr) js_ast.S {
+func (c *ModuleTransformerContext) generateExportStmt(loc logger.Loc, exportRef js_ast.Ref, name string, nameLoc logger.Loc, value *js_ast.Expr) js_ast.S {
 	if value.Data == nil {
 		value = &js_ast.Expr{
+			Loc:  loc,
 			Data: &js_ast.EUndefined{},
 		}
 	}
 	return &js_ast.SExpr{
 		Value: js_ast.Expr{
+			Loc: loc,
 			Data: &js_ast.EBinary{
 				Op: js_ast.BinOpAssign,
 				Left: js_ast.Expr{
+					Loc: loc,
 					Data: &js_ast.EDot{
 						Target: js_ast.Expr{
+							Loc: loc,
 							Data: &js_ast.EIdentifier{
 								Ref: exportRef,
 							},
 						},
-						Name: name,
+						NameLoc: nameLoc,
+						Name:    name,
 					},
 				},
 				Right: *value,
@@ -178,8 +183,15 @@ func (c *ModuleTransformerContext) generateExportStmt(exportRef js_ast.Ref, name
 }
 
 func (c *ModuleTransformerContext) markExportESM() {
+	mainPart := c.ast.Parts[0]
+	loc := logger.Loc{}
+	if len(mainPart.Stmts) > 0 {
+		loc = mainPart.Stmts[len(mainPart.Stmts)-1].Loc
+	}
 	c.tailStmts = append(c.tailStmts, js_ast.Stmt{
-		Data: c.generateExportStmt(c.ast.ExportsRef, "__esModule", &js_ast.Expr{
+		Loc: loc,
+		Data: c.generateExportStmt(loc, c.ast.ExportsRef, "__esModule", loc, &js_ast.Expr{
+			Loc:  loc,
 			Data: &js_ast.EBoolean{Value: true},
 		}),
 	})
@@ -202,17 +214,23 @@ func (c *ModuleTransformerContext) transformImportStmt(s *js_ast.Stmt) {
 			defaultNameRef := importStmt.DefaultName.Ref
 
 			expr := &js_ast.ERequireString{
+				CloseParenLoc:     importStmt.DefaultName.Loc,
 				ImportRecordIndex: s.Data.(*js_ast.SImport).ImportRecordIndex,
 			}
 
-			value := js_ast.Expr{Data: expr}
+			value := js_ast.Expr{Data: expr, Loc: importStmt.DefaultName.Loc}
 
 			if isESM {
 				value = js_ast.Expr{
+					Loc: s.Loc,
 					Data: &js_ast.ECall{
+						CloseParenLoc: s.Loc,
 						Target: js_ast.Expr{
+							Loc: s.Loc,
 							Data: &js_ast.EDot{
+								NameLoc: s.Loc,
 								Target: js_ast.Expr{
+									Loc: s.Loc,
 									Data: &js_ast.EIdentifier{
 										Ref: c.requireRef,
 									},
@@ -230,10 +248,12 @@ func (c *ModuleTransformerContext) transformImportStmt(s *js_ast.Stmt) {
 			}
 
 			c.headStmts = append(c.headStmts, js_ast.Stmt{
+				Loc: s.Loc,
 				Data: &js_ast.SLocal{
 					Decls: []js_ast.Decl{
 						{
 							Binding: js_ast.Binding{
+								Loc: importStmt.DefaultName.Loc,
 								Data: &js_ast.BIdentifier{
 									Ref: defaultNameRef,
 								},
@@ -268,6 +288,7 @@ func (c *ModuleTransformerContext) transformImportStmt(s *js_ast.Stmt) {
 				importModRef := c.generateNewSymbol(js_ast.SymbolHoisted, importModName)
 				// 解决循环引用模块问题
 				for _, item := range *s.Data.(*js_ast.SImport).Items {
+					copyItem := item
 					c.renameIdentifierExportCache[item.Name.Ref] = func(loc logger.Loc) js_ast.Expr {
 						return js_ast.Expr{
 							Loc: loc,
@@ -279,22 +300,25 @@ func (c *ModuleTransformerContext) transformImportStmt(s *js_ast.Stmt) {
 										Ref: importModRef,
 									},
 								},
-								Name: item.Alias,
+								Name: copyItem.Alias,
 							},
 						}
 					}
 				}
 
 				c.headStmts = append(c.headStmts, js_ast.Stmt{
+					Loc: s.Loc,
 					Data: &js_ast.SLocal{
 						Decls: []js_ast.Decl{
 							{
 								Binding: js_ast.Binding{
+									Loc: s.Loc,
 									Data: &js_ast.BIdentifier{
 										Ref: importModRef,
 									},
 								},
 								ValueOrNil: js_ast.Expr{
+									Loc:  s.Loc,
 									Data: expr,
 								},
 							},
@@ -303,8 +327,9 @@ func (c *ModuleTransformerContext) transformImportStmt(s *js_ast.Stmt) {
 				})
 			} else {
 				obj := js_ast.BObject{
-					Properties:   []js_ast.PropertyBinding{},
-					IsSingleLine: true,
+					CloseBraceLoc: s.Loc,
+					Properties:    []js_ast.PropertyBinding{},
+					IsSingleLine:  true,
 				}
 				for _, item := range *s.Data.(*js_ast.SImport).Items {
 					bindingName := item.OriginalName
@@ -312,12 +337,15 @@ func (c *ModuleTransformerContext) transformImportStmt(s *js_ast.Stmt) {
 						bindingName = item.Alias
 					}
 					obj.Properties = append(obj.Properties, js_ast.PropertyBinding{
+						Loc: s.Loc,
 						Key: js_ast.Expr{
+							Loc: item.Name.Loc,
 							Data: &js_ast.EString{
 								Value: helpers.StringToUTF16(bindingName),
 							},
 						},
 						Value: js_ast.Binding{
+							Loc: item.AliasLoc,
 							Data: &js_ast.BIdentifier{
 								Ref: item.Name.Ref,
 							},
@@ -326,13 +354,16 @@ func (c *ModuleTransformerContext) transformImportStmt(s *js_ast.Stmt) {
 				}
 
 				c.headStmts = append(c.headStmts, js_ast.Stmt{
+					Loc: s.Loc,
 					Data: &js_ast.SLocal{
 						Decls: []js_ast.Decl{
 							{
 								Binding: js_ast.Binding{
+									Loc:  s.Loc,
 									Data: &obj,
 								},
 								ValueOrNil: js_ast.Expr{
+									Loc:  s.Loc,
 									Data: expr,
 								},
 							},
@@ -352,23 +383,28 @@ func (c *ModuleTransformerContext) transformImportStmt(s *js_ast.Stmt) {
 
 			if importStmt.StarNameLoc == nil {
 				c.headStmts = append(c.headStmts, js_ast.Stmt{
+					Loc: s.Loc,
 					Data: &js_ast.SExpr{
 						Value: js_ast.Expr{
+							Loc:  s.Loc,
 							Data: expr,
 						},
 					},
 				})
 			} else {
 				c.headStmts = append(c.headStmts, js_ast.Stmt{
+					Loc: s.Loc,
 					Data: &js_ast.SLocal{
 						Decls: []js_ast.Decl{
 							{
 								Binding: js_ast.Binding{
+									Loc: s.Loc,
 									Data: &js_ast.BIdentifier{
 										Ref: importStmt.NamespaceRef,
 									},
 								},
 								ValueOrNil: js_ast.Expr{
+									Loc:  s.Loc,
 									Data: expr,
 								},
 							},
@@ -381,17 +417,19 @@ func (c *ModuleTransformerContext) transformImportStmt(s *js_ast.Stmt) {
 			expr := &js_ast.ERequireString{
 				ImportRecordIndex: importStmt.ImportRecordIndex,
 			}
-			// c.addImportRecordIndex(&expr.ImportRecordIndex)
 			c.headStmts = append(c.headStmts, js_ast.Stmt{
+				Loc: s.Loc,
 				Data: &js_ast.SExpr{
 					Value: js_ast.Expr{
+						Loc:  s.Loc,
 						Data: expr,
 					},
 				},
 			})
 		}
 
-		s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
+		s.Data = &js_ast.SEmpty{}
+		// s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
 	}
 }
 
@@ -421,13 +459,18 @@ func (c *ModuleTransformerContext) transformImportExpr(e *js_ast.Expr) {
 	}
 }
 
-func (c *ModuleTransformerContext) generateAssignToExport(exprs ...js_ast.Expr) js_ast.Expr {
+func (c *ModuleTransformerContext) generateAssignToExport(loc logger.Loc, exprs ...js_ast.Expr) js_ast.Expr {
 	ref := c.generateNewSymbol(js_ast.SymbolHoisted, "Object")
 	return js_ast.Expr{
+		Loc: loc,
 		Data: &js_ast.ECall{
+			CloseParenLoc: loc,
 			Target: js_ast.Expr{
+				Loc: loc,
 				Data: &js_ast.EDot{
+					NameLoc: loc,
 					Target: js_ast.Expr{
+						Loc:  loc,
 						Data: &js_ast.EIdentifier{Ref: ref},
 					},
 					Name: "assign",
@@ -435,6 +478,7 @@ func (c *ModuleTransformerContext) generateAssignToExport(exprs ...js_ast.Expr) 
 			},
 			Args: append([]js_ast.Expr{
 				{
+					Loc: loc,
 					Data: &js_ast.EIdentifier{
 						Ref: c.ast.ExportsRef,
 					},
@@ -553,21 +597,22 @@ func (c *ModuleTransformerContext) transformExportStmt(s *js_ast.Stmt) {
 	switch s.Data.(type) {
 	// export { xxx } from "xxx"
 	case *js_ast.SExportFrom:
-		// isESModule = true
 		exportFrom := s.Data.(*js_ast.SExportFrom)
-		s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
+		s.Data = &js_ast.SEmpty{}
+		// s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
 		for _, item := range exportFrom.Items {
 			require := &js_ast.ERequireString{
+				CloseParenLoc:     item.Name.Loc,
 				ImportRecordIndex: exportFrom.ImportRecordIndex,
 			}
-			// c.rewriteImportRecord(&require.ImportRecordIndex)
 			c.tailStmts = append(c.tailStmts, js_ast.Stmt{
-				Data: c.generateExportStmt(c.ast.ExportsRef, item.Alias, &js_ast.Expr{
+				Data: c.generateExportStmt(s.Loc, c.ast.ExportsRef, item.Alias, item.Name.Loc, &js_ast.Expr{
 					Loc: s.Loc,
 					Data: &js_ast.EDot{
+						NameLoc: item.Name.Loc,
 						Target: js_ast.Expr{
 							Data: require,
-							Loc:  s.Loc,
+							Loc:  item.Name.Loc,
 						},
 						Name: item.OriginalName,
 					},
@@ -584,16 +629,18 @@ func (c *ModuleTransformerContext) transformExportStmt(s *js_ast.Stmt) {
 		switch exportDefault.Data.(type) {
 		case *js_ast.SExpr:
 			c.tailStmts = append(c.tailStmts, js_ast.Stmt{
-				Data: c.generateExportStmt(c.ast.ExportsRef, "default", &exportDefault.Data.(*js_ast.SExpr).Value),
+				Data: c.generateExportStmt(s.Loc, c.ast.ExportsRef, "default", s.Loc, &exportDefault.Data.(*js_ast.SExpr).Value),
 				Loc:  s.Loc,
 			})
-			s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
+			s.Data = &js_ast.SEmpty{}
+			// s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
 		case *js_ast.SFunction:
 			if exportDefault.Data.(*js_ast.SFunction).Fn.Name != nil {
 				s.Data = exportDefault.Data
 				c.tailStmts = append(c.tailStmts, js_ast.Stmt{
-					Data: c.generateExportStmt(c.ast.ExportsRef, "default", &js_ast.Expr{
-						Loc: s.Loc,
+					Loc: s.Loc,
+					Data: c.generateExportStmt(s.Loc, c.ast.ExportsRef, "default", exportDefault.Loc, &js_ast.Expr{
+						Loc: exportDefault.Data.(*js_ast.SFunction).Fn.Name.Loc,
 						Data: &js_ast.EIdentifier{
 							Ref: exportDefault.Data.(*js_ast.SFunction).Fn.Name.Ref,
 						},
@@ -601,12 +648,14 @@ func (c *ModuleTransformerContext) transformExportStmt(s *js_ast.Stmt) {
 				})
 			} else {
 				c.tailStmts = append(c.tailStmts, js_ast.Stmt{
-					Data: c.generateExportStmt(c.ast.ExportsRef, "default", &js_ast.Expr{
+					Loc: s.Loc,
+					Data: c.generateExportStmt(s.Loc, c.ast.ExportsRef, "default", s.Loc, &js_ast.Expr{
 						Loc:  s.Loc,
 						Data: &js_ast.EFunction{Fn: exportDefault.Data.(*js_ast.SFunction).Fn},
 					}),
 				})
-				s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
+				s.Data = &js_ast.SEmpty{}
+				// s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
 			}
 		}
 
@@ -619,12 +668,13 @@ func (c *ModuleTransformerContext) transformExportStmt(s *js_ast.Stmt) {
 				symbol := c.symbols.Get(ref)
 
 				c.tailStmts = append(c.tailStmts, js_ast.Stmt{
-					Data: c.generateExportStmt(c.ast.ExportsRef, symbol.OriginalName, &js_ast.Expr{
+					Data: c.generateExportStmt(s.Loc, c.ast.ExportsRef, symbol.OriginalName, decl.Binding.Loc, &js_ast.Expr{
+						Loc: decl.Binding.Loc,
 						Data: &js_ast.EIdentifier{
 							Ref: ref,
 						},
 					}),
-					Loc: s.Loc,
+					Loc: decl.Binding.Loc,
 				})
 			}
 		}
@@ -635,11 +685,12 @@ func (c *ModuleTransformerContext) transformExportStmt(s *js_ast.Stmt) {
 			symbol := c.symbols.Get(ref)
 			s.Data.(*js_ast.SFunction).IsExport = false
 			c.tailStmts = append(c.tailStmts, js_ast.Stmt{
-				Data: c.generateExportStmt(c.ast.ExportsRef, symbol.OriginalName, &js_ast.Expr{
+				Loc: s.Loc,
+				Data: c.generateExportStmt(s.Loc, c.ast.ExportsRef, symbol.OriginalName, s.Loc, &js_ast.Expr{
 					Data: &js_ast.EIdentifier{
 						Ref: ref,
 					},
-					Loc: s.Loc,
+					Loc: s.Data.(*js_ast.SFunction).Fn.Name.Loc,
 				},
 				),
 			})
@@ -653,29 +704,33 @@ func (c *ModuleTransformerContext) transformExportStmt(s *js_ast.Stmt) {
 				name = item.Alias
 			}
 			expr := js_ast.Expr{
+				Loc: item.Name.Loc,
 				Data: &js_ast.EIdentifier{
 					Ref: item.Name.Ref,
 				},
 			}
 			if e, ok := c.renameIdentifierExportCache[item.Name.Ref]; ok {
-				expr = e(expr.Loc)
+				expr = e(item.Name.Loc)
 			}
 			properties = append(properties, js_ast.Property{
+				Loc: item.Name.Loc,
 				Key: js_ast.Expr{
+					Loc:  item.Name.Loc,
 					Data: &js_ast.EString{Value: helpers.StringToUTF16(name)},
 				},
 				ValueOrNil: expr,
 			})
 		}
 		c.tailStmts = append(c.tailStmts, js_ast.Stmt{
+			Loc: s.Loc,
 			Data: &js_ast.SExpr{
-				Value: c.generateAssignToExport(js_ast.Expr{Data: &js_ast.EObject{
+				Value: c.generateAssignToExport(s.Loc, js_ast.Expr{Data: &js_ast.EObject{
 					Properties: properties,
 				}}),
 			},
-			Loc: s.Loc,
 		})
-		s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
+		s.Data = &js_ast.SEmpty{}
+		// s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
 	case *js_ast.SExportStar:
 		c.ast.ExportsKind = js_ast.ExportsESMWithDynamicFallback
 		index := &s.Data.(*js_ast.SExportStar).ImportRecordIndex
@@ -686,7 +741,8 @@ func (c *ModuleTransformerContext) transformExportStmt(s *js_ast.Stmt) {
 		// export * as xxx from 'mod'
 		if s.Data.(*js_ast.SExportStar).Alias != nil {
 			c.tailStmts = append(c.tailStmts, js_ast.Stmt{
-				Data: c.generateExportStmt(c.ast.ExportsRef, s.Data.(*js_ast.SExportStar).Alias.OriginalName, &js_ast.Expr{
+				Loc: s.Loc,
+				Data: c.generateExportStmt(s.Loc, c.ast.ExportsRef, s.Data.(*js_ast.SExportStar).Alias.OriginalName, s.Data.(*js_ast.SExportStar).Alias.Loc, &js_ast.Expr{
 					Data: expr,
 				},
 				),
@@ -694,12 +750,14 @@ func (c *ModuleTransformerContext) transformExportStmt(s *js_ast.Stmt) {
 			// export * form 'mod'
 		} else {
 			c.tailStmts = append(c.tailStmts, js_ast.Stmt{
+				Loc: s.Loc,
 				Data: &js_ast.SExpr{
-					Value: c.generateAssignToExport(js_ast.Expr{Data: expr}),
+					Value: c.generateAssignToExport(s.Loc, js_ast.Expr{Loc: s.Loc, Data: expr}),
 				},
 			})
 		}
-		s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
+		s.Data = &js_ast.SEmpty{}
+		// s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
 	}
 }
 
@@ -737,25 +795,33 @@ func (c *ModuleTransformerContext) generateReactRefreshCode() {
 	signatureDecls := []js_ast.Stmt{}
 	signatureCalls := []js_ast.Stmt{}
 	registerCalls := []js_ast.Stmt{}
-	for _, signature := range c.reactComponentOrHooks {
+	for loc, signature := range c.reactComponentOrHooks {
 		ref := c.generateNewSymbol(js_ast.SymbolHoisted, fmt.Sprintf("_$s%d", signatureCount))
 		signatureCount++
 		signatureDecls = append(signatureDecls, js_ast.Stmt{
+			Loc: loc,
 			Data: &js_ast.SLocal{
 				Decls: []js_ast.Decl{
 					{
 						Binding: js_ast.Binding{
+							Loc: loc,
 							Data: &js_ast.BIdentifier{
 								Ref: ref,
 							},
 						},
 						ValueOrNil: js_ast.Expr{
+							Loc: loc,
 							Data: &js_ast.ECall{
+								CloseParenLoc: loc,
 								Target: js_ast.Expr{
 									Data: &js_ast.EDot{
+										NameLoc: loc,
 										Target: js_ast.Expr{
+											Loc: loc,
 											Data: &js_ast.EDot{
+												NameLoc: loc,
 												Target: js_ast.Expr{
+													Loc: loc,
 													Data: &js_ast.EIdentifier{
 														Ref: c.requireRef,
 													},
@@ -773,9 +839,12 @@ func (c *ModuleTransformerContext) generateReactRefreshCode() {
 			},
 		})
 		signatureCalls = append(signatureCalls, js_ast.Stmt{
+			Loc: loc,
 			Data: &js_ast.SExpr{
 				Value: js_ast.Expr{
+					Loc: loc,
 					Data: &js_ast.ECall{
+						CloseParenLoc: loc,
 						Target: js_ast.Expr{
 							Data: &js_ast.EIdentifier{
 								Ref: ref,
@@ -783,23 +852,32 @@ func (c *ModuleTransformerContext) generateReactRefreshCode() {
 						},
 						Args: []js_ast.Expr{
 							{
+								Loc:  loc,
 								Data: &js_ast.EIdentifier{Ref: signature.binding},
 							},
 							{
+								Loc:  loc,
 								Data: &js_ast.EString{Value: helpers.StringToUTF16(c.computeReactSignautreKey(*signature))},
 							},
 							{
+								Loc:  loc,
 								Data: &js_ast.EBoolean{Value: false},
 							},
 							{
+								Loc: loc,
 								Data: &js_ast.EFunction{
 									Fn: js_ast.Fn{
+										OpenParenLoc: loc,
 										Body: js_ast.FnBody{
+											Loc: loc,
 											Block: js_ast.SBlock{
+												CloseBraceLoc: loc,
 												Stmts: []js_ast.Stmt{
 													{
+														Loc: loc,
 														Data: &js_ast.SReturn{
 															ValueOrNil: js_ast.Expr{
+																Loc:  loc,
 																Data: &js_ast.EArray{Items: signature.customHooks},
 															},
 														},
@@ -937,11 +1015,15 @@ func (c *ModuleTransformerContext) wrapCJS() {
 	c.ast.Directive = ""
 
 	mainPart := &c.ast.Parts[0]
-
+	loc := logger.Loc{}
+	if len(mainPart.Stmts) > 0 {
+		loc = mainPart.Stmts[0].Loc
+	}
 	var stmts []js_ast.Stmt
 	if directive != "" {
 		stmts = append([]js_ast.Stmt{
 			{
+				Loc: loc,
 				Data: &js_ast.SDirective{
 					Value: helpers.StringToUTF16(directive),
 				},
@@ -952,13 +1034,17 @@ func (c *ModuleTransformerContext) wrapCJS() {
 	}
 	c.ast.Parts[0].Stmts = []js_ast.Stmt{
 		{
+			Loc: loc,
 			Data: &js_ast.SExpr{
 				Value: js_ast.Expr{
+					Loc: loc,
 					Data: &js_ast.EFunction{
 						Fn: js_ast.Fn{
+							OpenParenLoc: loc,
 							Args: []js_ast.Arg{
 								{
 									Binding: js_ast.Binding{
+										Loc: loc,
 										Data: &js_ast.BIdentifier{
 											Ref: c.moduleRef,
 										},
@@ -966,6 +1052,7 @@ func (c *ModuleTransformerContext) wrapCJS() {
 								},
 								{
 									Binding: js_ast.Binding{
+										Loc: loc,
 										Data: &js_ast.BIdentifier{
 											Ref: c.exportsRef,
 										},
@@ -973,6 +1060,7 @@ func (c *ModuleTransformerContext) wrapCJS() {
 								},
 								{
 									Binding: js_ast.Binding{
+										Loc: loc,
 										Data: &js_ast.BIdentifier{
 											Ref: c.requireRef,
 										},
@@ -980,6 +1068,7 @@ func (c *ModuleTransformerContext) wrapCJS() {
 								},
 							},
 							Body: js_ast.FnBody{
+								Loc: loc,
 								Block: js_ast.SBlock{
 									Stmts: stmts,
 								},

@@ -1,4 +1,4 @@
-export function test() {
+export function testA() {
   console.trace()
   throw new Error("test")
 }

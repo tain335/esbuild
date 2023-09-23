@@ -1,5 +1,5 @@
 // import React, {useState} from 'react'
-import { test } from './moduleA';
+import { testA } from './moduleA';
 // import "./email-validator"
 
 // function Component() {
@@ -21,6 +21,18 @@ const apple = 10;
 const orange = 20;
 const total = sum(apple, orange)
 
-console.log(test())
+console.log(testA())
 console.log(total);
-// console.log(render())
+
+export function moda() {
+  console.log("Hello world")
+  console.log("Hello world")
+}
+
+export default {
+  moda: moda,
+  mod: function mod(){
+    console.log("Hello world")
+    console.log("Hello world")
+  }
+}
