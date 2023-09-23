@@ -573,10 +573,12 @@ func StreamLinker(
 	buildOptions = options
 	var wg sync.WaitGroup
 	timer.Begin("Stream link")
+	var fileCount = 0
 loop:
 	for {
 		select {
 		case file := <-fileChannel:
+			fileCount++
 			wg.Add(1)
 			if _, ok := runtimeSourceCache[file.InputFile.Source.KeyPath.Text]; ok {
 				runtimeSourceCache[file.InputFile.Source.KeyPath.Text] = file.InputFile.Source.Index
@@ -646,6 +648,13 @@ loop:
 		}
 	}
 	wg.Wait()
+
+	log.AddMsg(logger.Msg{
+		Kind: logger.Info,
+		Data: logger.MsgData{
+			Text: fmt.Sprintf("File Count: %d", fileCount),
+		},
+	})
 
 	manifest := Manifest{
 		H: RandHash(16),
@@ -871,7 +880,7 @@ loop:
 	log.AddMsg(logger.Msg{
 		Kind: logger.Info,
 		Data: logger.MsgData{
-			Text: "current hash: " + currentHash,
+			Text: "Current Hash: " + currentHash,
 		},
 	})
 

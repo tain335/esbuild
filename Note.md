@@ -283,14 +283,14 @@ Step 2
 	* 采用golang模版语法
 5. source_map // doing
 	* 初步支持 // done
-	* input source map支持
+	* input source map支持 // done
 6. tree shaking效果对比
 7. stream link降低开发时内存消耗 // doing
 8. 重构stream link
  * 思考能不能并行link，采用信号机制，通过定义方法获取内容，若不存在则等待
 9. 整合stream link和link和加强插件机制
 10. test用例 // doing
-	* 补充用例
+	* 补充用例 // doing
 11. 重构dev server
 	* 初步完成 // done
 	* 需要一个统一的配置入口，代替原来的，简化整个配置流程
@@ -308,6 +308,7 @@ Step 4
 	* 找出相似模块，或者内容相似的文件
 	* 找出项目没有引用文件
 	* 找出文件中没有引用的类或者函数
+3. 增加错误弹窗
 
 目标：能够高效分析页面模块依赖关系
 

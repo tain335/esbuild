@@ -34,11 +34,11 @@ func main() {
 		Loader: map[string]esbuild.Loader{
 			".js":   esbuild.LoaderJSX,
 			".jsx":  esbuild.LoaderJSX,
-			".ttf":  esbuild.LoaderBase64,
-			".png":  esbuild.LoaderBase64,
-			".jpg":  esbuild.LoaderBase64,
-			".jpeg": esbuild.LoaderBase64,
-			".svg":  esbuild.LoaderBase64,
+			".ttf":  esbuild.LoaderDataURL,
+			".png":  esbuild.LoaderDataURL,
+			".jpg":  esbuild.LoaderDataURL,
+			".jpeg": esbuild.LoaderDataURL,
+			".svg":  esbuild.LoaderDataURL,
 		},
 		// LogLevel:       esbuild.LogLevelError,
 		Format:         esbuild.FormatCommonJS, //非常重要 如果是esm模式输出会require重写__require

@@ -1098,11 +1098,14 @@ func (c *ModuleTransformerContext) transformOtherToCJS() ModuleTransformResult {
 		EnterStmt: func(s *js_ast.Stmt, path *js_ast.NodePath, iterator *js_ast.StmtIterator) {
 			if lazy, ok := s.Data.(*js_ast.SLazyExport); ok {
 				*s = js_ast.AssignStmt(
-					js_ast.Expr{Loc: lazy.Value.Loc, Data: &js_ast.EDot{
-						Target:  js_ast.Expr{Loc: lazy.Value.Loc, Data: &js_ast.EIdentifier{Ref: c.ast.ModuleRef}},
-						Name:    "exports",
-						NameLoc: lazy.Value.Loc,
-					}},
+					js_ast.Expr{
+						Loc: lazy.Value.Loc,
+						Data: &js_ast.EDot{
+							Target:  js_ast.Expr{Loc: lazy.Value.Loc, Data: &js_ast.EIdentifier{Ref: c.ast.ModuleRef}},
+							Name:    "exports",
+							NameLoc: lazy.Value.Loc,
+						},
+					},
 					lazy.Value,
 				)
 			}

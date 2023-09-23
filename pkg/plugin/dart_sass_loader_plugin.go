@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -97,7 +98,7 @@ func DartSassLoaderPlugin() api.Plugin {
 		panic(err)
 	}
 	t, err := godartsass.Start(godartsass.Options{
-		DartSassEmbeddedFilename: filepath.Join(cwd, ".espack", "plugin", "dart-sass", "sass"),
+		DartSassEmbeddedFilename: filepath.Join(cwd, ".espack", "plugin", runtime.GOOS, "dart-sass", "sass"),
 		Timeout:                  60 * time.Second,
 		LogEventHandler: func(e godartsass.LogEvent) {
 			fmt.Println(e)
