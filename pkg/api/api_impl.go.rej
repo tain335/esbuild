@@ -1,9 +1,0 @@
-diff a/pkg/api/api_impl.go b/pkg/api/api_impl.go	(rejected hunks)
-@@ -1020,7 +1020,6 @@ func rebuildImpl(
- 		if !log.HasErrors() {
- 			// Compile the bundle
- 			results, metafile := bundle.Compile(log, options, timer)
--
- 			// Stop now if there were errors
- 			if !log.HasErrors() {
- 				metafileJSON = metafile

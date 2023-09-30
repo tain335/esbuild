@@ -79,6 +79,8 @@ package api
 import (
 	"time"
 
+	"github.com/evanw/esbuild/internal/bundler"
+	codespliting "github.com/evanw/esbuild/internal/code_spliting"
 	"github.com/evanw/esbuild/internal/logger"
 )
 
@@ -344,6 +346,7 @@ type BuildOptions struct {
 type EntryPoint struct {
 	InputPath  string
 	OutputPath string
+	Name       string
 }
 
 type StdinOptions struct {
@@ -353,11 +356,13 @@ type StdinOptions struct {
 	Loader     Loader
 }
 
+//TODO 原本link流程也要加入支持，缺失Chunks和EntryPoints
 type BuildResult struct {
-	Errors   []Message
-	Warnings []Message
-
+	Errors      []Message
+	Warnings    []Message
+	EntryPoints []bundler.EntryPoint
 	OutputFiles []OutputFile
+	Chunks      []codespliting.ChunkNode
 	Metafile    string
 	MangleCache map[string]interface{}
 }
@@ -365,6 +370,16 @@ type BuildResult struct {
 type OutputFile struct {
 	Path     string
 	Contents []byte
+	Chunks   []string
+}
+
+func (o OutputFile) ContainChunk(chunk string) bool {
+	for _, c := range o.Chunks {
+		if c == chunk {
+			return true
+		}
+	}
+	return false
 }
 
 // Documentation: https://esbuild.github.io/api/#build-api

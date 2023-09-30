@@ -41,6 +41,8 @@ type OutputFile struct {
 	AbsPath      string
 	Contents     []byte
 	IsExecutable bool
+	// 标识文件包含哪些chunk
+	Chunks []string
 }
 
 type SideEffects struct {

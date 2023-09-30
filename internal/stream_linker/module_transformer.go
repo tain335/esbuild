@@ -429,7 +429,6 @@ func (c *ModuleTransformerContext) transformImportStmt(s *js_ast.Stmt) {
 		}
 
 		s.Data = &js_ast.SEmpty{}
-		// s.Data = &js_ast.SComment{Text: "// ESM Transformed"}
 	}
 }
 

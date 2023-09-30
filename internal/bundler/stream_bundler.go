@@ -75,6 +75,11 @@ func resolveRuntime(log logger.Log, s *scanner, options *config.Options) []parse
 	return runtimeResults
 }
 
+type StreamCompileResult struct {
+	streamlinker.StreamLinkerResult
+	MetaJSON string
+}
+
 func ScanBundleByStream(
 	log logger.Log,
 	fs fs.FS,
@@ -213,18 +218,17 @@ func (s *scanner) scanAllDependenciesByStream(runtimeResults []parseResult, file
 	doneChannel <- true
 }
 
-func (b *StreamBundle) Compile(log logger.Log, timer *helpers.Timer, mangleCache map[string]interface{}) ([]graph.OutputFile, string, fs.WatchData) {
+func (b *StreamBundle) Compile(log logger.Log, timer *helpers.Timer, mangleCache map[string]interface{}) StreamCompileResult {
 	timer.Begin("Compile phase")
 	defer timer.End("Compile phase")
 
 	options := b.options
 
-	// In most cases we don't need synchronized access to the mangle cache
-	// options.ExclusiveMangleCacheUpdate = func(cb func(mangleCache map[string]interface{})) {
-	// 	cb(mangleCache)
-	// }
-	results, watchData := streamlinker.StreamLinker(&options, timer, log, b.entryPoints, b.fileChannel, b.doneChannel)
-	return results, "", watchData
+	linkerResult := streamlinker.StreamLinker(&options, timer, log, b.entryPoints, b.fileChannel, b.doneChannel)
+	return StreamCompileResult{
+		StreamLinkerResult: linkerResult,
+		MetaJSON:           "",
+	}
 }
 
 func IncrementalBuildBundle(path string) StreamBundle {

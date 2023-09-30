@@ -294,10 +294,12 @@ Step 2
 11. 重构dev server
 	* 初步完成 // done
 	* 需要一个统一的配置入口，代替原来的，简化整个配置流程
+12. 处理动态导入require.ensure和import(xxx)
+	异步chunk可以使用懒处理
 目标：能够使用espack开发项目
 
 Step 3
-1. 添加code-spliting算法模块，能够基于请求数或者文件大小来分块
+1. 添加code-spliting算法模块，能够基于请求数或者文件大小来分块 // doing
 2. async chunk处理
 目标：能够使用espack进行打包
 
@@ -309,6 +311,9 @@ Step 4
 	* 找出项目没有引用文件
 	* 找出文件中没有引用的类或者函数
 3. 增加错误弹窗
+4. 支持node模块
+	* js转snapshot提升启动速度
+	* 使用probuf通信
 
 目标：能够高效分析页面模块依赖关系
 

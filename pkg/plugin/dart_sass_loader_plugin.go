@@ -89,38 +89,44 @@ type SourceMap struct {
 }
 
 func DartSassLoaderPlugin() api.Plugin {
-	cwd, err := os.Getwd()
-	if err != nil {
-		panic(err)
-	}
-	err = initDartSass(cwd)
-	if err != nil {
-		panic(err)
-	}
-	t, err := godartsass.Start(godartsass.Options{
-		DartSassEmbeddedFilename: filepath.Join(cwd, ".espack", "plugin", runtime.GOOS, "dart-sass", "sass"),
-		Timeout:                  60 * time.Second,
-		LogEventHandler: func(e godartsass.LogEvent) {
-			fmt.Println(e)
-		},
-	})
-	if err != nil {
-		panic(err)
-	}
-	allNodeModules := getAllNodeModuleDirs(cwd)
 	return api.Plugin{
 		Name: "DartSassLoaderPlugin",
 		Setup: func(pb api.PluginBuild) {
+			var transpiler *godartsass.Transpiler
+			var err error
+			cwd, err := os.Getwd()
+			if err != nil {
+				panic(err)
+			}
+			err = initDartSass(cwd)
+			if err != nil {
+				panic(err)
+			}
+			transpiler, err = godartsass.Start(godartsass.Options{
+				DartSassEmbeddedFilename: filepath.Join(cwd, ".espack", "plugin", runtime.GOOS, "dart-sass", "sass"),
+				Timeout:                  60 * time.Second,
+				LogEventHandler: func(e godartsass.LogEvent) {
+					fmt.Println(e)
+				},
+			})
+			if err != nil {
+				panic(err)
+			}
+
 			pb.OnLoad(api.OnLoadOptions{
 				Filter: "\\.scss$",
 			}, func(ola api.OnLoadArgs) (api.OnLoadResult, error) {
+				if ola.Namespace != "" && ola.Namespace != "file" {
+					panic(fmt.Errorf("not support namespace: %s", ola.Namespace))
+				}
 				start := time.Now().UnixMilli()
 				data, err := ioutil.ReadFile(ola.Path)
 				if err != nil {
-					panic(err)
+					return api.OnLoadResult{}, err
 				}
 				content := string(data)
-				result, err := t.Execute(godartsass.Args{
+				allNodeModules := getAllNodeModuleDirs(ola.Path)
+				result, err := transpiler.Execute(godartsass.Args{
 					URL:             "file://" + ola.Path,
 					Source:          content,
 					EnableSourceMap: true,

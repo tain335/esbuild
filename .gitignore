@@ -27,6 +27,7 @@
 /www
 bin
 esbuild.exe
-node_modules/
+node_modules
+!pkg/espack_tests/sass_import/node_modules
 .espack
 build

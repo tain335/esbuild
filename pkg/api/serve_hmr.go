@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -210,7 +209,7 @@ func (d *DevServer) socketHandler(w http.ResponseWriter, r *http.Request) {
 
 func (d *DevServer) resourceHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
-		if content, ok := d.fileCache[path.Base(r.URL.Path)]; ok {
+		if content, ok := d.fileCache[filepath.Base(r.URL.Path)]; ok {
 			if strings.HasSuffix(r.URL.Path, ".js") {
 				w.Header().Set("Content-Type", "text/javascript")
 			} else if strings.HasSuffix(r.URL.Path, ".css") {
@@ -248,7 +247,7 @@ func (d *DevServer) onBuild(br BuildResult) {
 
 			for _, file := range br.OutputFiles {
 				size, unit := formatFileSize(len(file.Contents))
-				outputMsg += fmt.Sprintf("\t%s %.2f%s\n", path.Base(file.Path), size, unit)
+				outputMsg += fmt.Sprintf("\t%s %.2f%s\n", filepath.Base(file.Path), size, unit)
 				err := os.MkdirAll(filepath.Dir(file.Path), 0777)
 				if err != nil {
 					logger.Errorf("err: %s", err.Error())
@@ -257,7 +256,7 @@ func (d *DevServer) onBuild(br BuildResult) {
 				if err != nil {
 					logger.Errorf("err: %s", err.Error())
 				}
-				d.fileCache[path.Base(file.Path)] = file.Contents
+				d.fileCache[filepath.Base(file.Path)] = file.Contents
 			}
 			logger.Infof("Output files: \n%s", outputMsg[:len(outputMsg)-1])
 			d.sendMessageToAllConn(PackMessage{

@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+  <head></head>
+  <body>
+    <div>{{.Key}}</div>
+    <ul>
+      {{range .Arr}}
+        <li>{{.}}</li>
+      {{end}}
+    </ul>
+     
+    {{if .Cond}}
+      <div>Cond</div>
+    {{end}}
+    <!--script_output-->
+  </body>
+</html>

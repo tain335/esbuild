@@ -2,12 +2,14 @@ package streamlinker
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
-	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/evanw/esbuild/internal/ast"
+	codespliting "github.com/evanw/esbuild/internal/code_spliting"
 	"github.com/evanw/esbuild/internal/config"
 	"github.com/evanw/esbuild/internal/css_ast"
 	"github.com/evanw/esbuild/internal/css_lexer"
@@ -562,6 +564,12 @@ type SourcemapItem struct {
 	Contents []byte
 }
 
+type StreamLinkerResult struct {
+	OutputFiles []graph.OutputFile
+	Chunks      []codespliting.ChunkNode
+	WatchData   fs.WatchData
+}
+
 func StreamLinker(
 	options *config.Options,
 	timer *helpers.Timer,
@@ -569,7 +577,7 @@ func StreamLinker(
 	entryPoints []graph.EntryPoint,
 	fileChannel chan StremInputFile,
 	doneChannel chan bool,
-) (results []graph.OutputFile, watchData fs.WatchData) {
+) StreamLinkerResult {
 	buildOptions = options
 	var wg sync.WaitGroup
 	timer.Begin("Stream link")
@@ -661,15 +669,22 @@ loop:
 		C: map[string]bool{},
 	}
 
-	watchData = fs.WatchData{
+	if flag.Lookup("test.v") != nil {
+		manifest.H = "espack_test"
+	}
+
+	var watchData = fs.WatchData{
 		Paths: map[string]func() string{},
 	}
+	var outputFiles = []graph.OutputFile{}
+
+	var chunks = []codespliting.ChunkNode{}
 
 	// link
 	// 异步chunk
 	// 多页面entry chunk，如果不提取到公共模块模块也应该复制一份
-	for i, entry := range entryPoints {
-		var chunkId = fmt.Sprintf("%d", i)
+	for _, entry := range entryPoints {
+		var chunkId = entry.Name
 		var modules = []LinkModule{}
 
 		var visitedModules = make(map[uint32]bool)
@@ -819,8 +834,8 @@ loop:
 			hotData := generateHotCode(chunkId, visitedModules, chunkModuleCache[chunkId])
 			if hotData != nil {
 				manifest.C[chunkId] = true
-				results = append(results, graph.OutputFile{
-					AbsPath:  path.Join(options.AbsOutputDir, chunkId+"."+currentHash+".hot-update.js"),
+				outputFiles = append(outputFiles, graph.OutputFile{
+					AbsPath:  filepath.Join(options.AbsOutputDir, chunkId+"."+currentHash+".hot-update.js"),
 					Contents: hotData,
 				})
 			} else {
@@ -830,20 +845,33 @@ loop:
 
 		chunkModuleCache[chunkId] = visitedModules
 
-		ext := path.Ext(entry.OutputPath)
+		ext := filepath.Ext(entry.OutputPath)
 		if ext != "" {
 			ext = ""
 		} else {
 			ext = ".js"
 		}
 		output.AddString("//# sourceMappingURL=" + entry.OutputPath + ext + ".map")
-		results = append(results, graph.OutputFile{
-			AbsPath:  path.Join(options.AbsOutputDir, entry.OutputPath+ext),
-			Contents: output.Done(),
+
+		content := output.Done()
+
+		outputFiles = append(outputFiles, graph.OutputFile{
+			Chunks:   []string{entry.Name},
+			AbsPath:  filepath.Join(options.AbsOutputDir, entry.OutputPath+ext),
+			Contents: content,
 		})
 
-		results = append(results, graph.OutputFile{
-			AbsPath:  path.Join(options.AbsOutputDir, entry.OutputPath+ext+".map"),
+		chunks = append(chunks, codespliting.ChunkNode{
+			Name:         entry.Name,
+			IsEntryPoint: true,
+			Kind:         codespliting.JSChunk,
+			Async:        false,
+			Content:      content,
+			SourceIndex:  entry.SourceIndex,
+		})
+
+		outputFiles = append(outputFiles, graph.OutputFile{
+			AbsPath:  filepath.Join(options.AbsOutputDir, entry.OutputPath+ext+".map"),
 			Contents: sourcemapOutput.Done(),
 		})
 
@@ -858,8 +886,8 @@ loop:
 
 	if currentHash != "" {
 		manifestContent, _ := json.Marshal(manifest)
-		results = append(results, graph.OutputFile{
-			AbsPath:  path.Join(options.AbsOutputDir, currentHash+".hot-update.json"),
+		outputFiles = append(outputFiles, graph.OutputFile{
+			AbsPath:  filepath.Join(options.AbsOutputDir, currentHash+".hot-update.json"),
 			Contents: manifestContent,
 		})
 	}
@@ -869,8 +897,8 @@ loop:
 	needReleaseModules = make([]uint32, 0)
 	needUpdateModules = make([]uint32, 0)
 
-	results = append(results, graph.OutputFile{
-		AbsPath:  path.Join(options.AbsOutputDir, "versions"),
+	outputFiles = append(outputFiles, graph.OutputFile{
+		AbsPath:  filepath.Join(options.AbsOutputDir, "versions"),
 		Contents: []byte(manifest.H),
 	})
 
@@ -884,5 +912,9 @@ loop:
 		},
 	})
 
-	return
+	return StreamLinkerResult{
+		OutputFiles: outputFiles,
+		Chunks:      chunks,
+		WatchData:   watchData,
+	}
 }
